@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildToolsPath)\Microsoft.Common.props" Condition="Exists('$(MSBuildToolsPath)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{BB81028A-0C99-4EC3-AD3E-8D46B52B41A2}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <StartupObject>CsvPreviewer.Program</StartupObject>
+    <RootNamespace>CsvPreviewer</RootNamespace>
+    <AssemblyName>CSViewer</AssemblyName>
+    <ApplicationIcon>Assets\CSViewer.ico</ApplicationIcon>
+    <FileAlignment>512</FileAlignment>
+    <MyType>Empty</MyType>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <TargetFrameworkProfile />
+    <OptionExplicit>On</OptionExplicit>
+    <OptionCompare>Binary</OptionCompare>
+    <OptionStrict>On</OptionStrict>
+    <OptionInfer>On</OptionInfer>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <DefineDebug>true</DefineDebug>
+    <DefineTrace>true</DefineTrace>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DocumentationFile>CSViewer.xml</DocumentationFile>
+    <NoWarn>42016,41999,42017,42018,42019,42032</NoWarn>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <DefineDebug>false</DefineDebug>
+    <DefineTrace>true</DefineTrace>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DocumentationFile>CSViewer.xml</DocumentationFile>
+    <NoWarn>42016,41999,42017,42018,42019,42032</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.VisualBasic" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+  <ItemGroup>
+    <Import Include="Microsoft.VisualBasic" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="AppIcon.vb" />
+    <Compile Include="BufferedDataGridView.vb" />
+    <Compile Include="CsvExporter.vb" />
+    <Compile Include="CsvModels.vb" />
+    <Compile Include="CsvParser.vb" />
+    <Compile Include="CsvSqlEngine.vb" />
+    <Compile Include="CsvTableBuilder.vb" />
+    <Compile Include="CsvTextCodec.vb" />
+    <Compile Include="ExportOptionsForm.vb" />
+    <Compile Include="MainForm.vb" />
+    <Compile Include="Program.vb" />
+    <Compile Include="SqlQueryForm.vb" />
+    <Compile Include="My Project\AssemblyInfo.vb" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\CSViewer.ico">
+      <LogicalName>CsvPreviewer.Assets.CSViewer.ico</LogicalName>
+    </EmbeddedResource>
+    <None Include="Assets\CSViewer.png" />
+    <None Include="App.config" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
+</Project>
