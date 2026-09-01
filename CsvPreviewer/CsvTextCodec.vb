@@ -351,7 +351,7 @@ Public NotInheritable Class CsvTextCodec
         Next
 
         If expectedNulls = 0 AndAlso structuralPairs = 0 Then
-            Return Integer.MinValue \\ 4
+            Return -536870912
         End If
 
         Dim score As Integer =
