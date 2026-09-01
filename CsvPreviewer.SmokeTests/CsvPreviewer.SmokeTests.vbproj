@@ -6,7 +6,7 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{A09B5C23-68DD-4B93-A899-C45880749FC5}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <StartupObject>CsvPreviewer.SmokeTests.Program</StartupObject>
+    <StartupObject>CsvPreviewer.SmokeTests.RegressionProgram</StartupObject>
     <RootNamespace>CsvPreviewer.SmokeTests</RootNamespace>
     <AssemblyName>CsvPreviewer.SmokeTests</AssemblyName>
     <FileAlignment>512</FileAlignment>
@@ -45,6 +45,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Program.vb" />
+    <Compile Include="RegressionProgram.vb" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\CsvPreviewer\CsvPreviewer.vbproj">
