@@ -207,9 +207,9 @@ Friend Module RegressionProgram
     End Sub
 
     Private Sub ExportUtf8WithBom()
-        Dim directory As String = CreateTemporaryDirectory("CSViewerBomTests_")
+        Dim tempDirectory As String = CreateTemporaryDirectory("CSViewerBomTests_")
         Try
-            Dim outputPath As String = Path.Combine(directory, "output.csv")
+            Dim outputPath As String = System.IO.Path.Combine(tempDirectory, "output.csv")
             Dim document As CsvDocument =
                 CsvParser.ParseText(
                     "code,name" & ControlChars.CrLf & "0000001,""東京,本店""",
@@ -232,7 +232,7 @@ Friend Module RegressionProgram
             AssertEqual(CByte(&HBB), bytes(1), "UTF-8 BOM 2")
             AssertEqual(CByte(&HBF), bytes(2), "UTF-8 BOM 3")
         Finally
-            Directory.Delete(directory, True)
+            System.IO.Directory.Delete(tempDirectory, True)
         End Try
     End Sub
 
@@ -392,11 +392,11 @@ Friend Module RegressionProgram
     End Sub
 
     Private Sub PreserveLossyDecodeState()
-        Dim directory As String = CreateTemporaryDirectory("CSViewerLossyTests_")
+        Dim tempDirectory As String = CreateTemporaryDirectory("CSViewerLossyTests_")
         Try
-            Dim path As String = Path.Combine(directory, "shiftjis.csv")
+            Dim filePath As String = System.IO.Path.Combine(tempDirectory, "shiftjis.csv")
             File.WriteAllBytes(
-                path,
+                filePath,
                 Encoding.GetEncoding(932).GetBytes(
                     "code,name" & ControlChars.CrLf & "1,東京"))
 
@@ -405,7 +405,7 @@ Friend Module RegressionProgram
                 .Delimiter = CsvDelimiterOption.Comma,
                 .HasHeader = True
             }
-            Dim document As CsvDocument = CsvParser.Load(path, options)
+            Dim document As CsvDocument = CsvParser.Load(filePath, options)
             AssertTrue(document.IsLossyDecode,
                        "復号エラー時にIsLossyDecodeが立っていません。")
             AssertTrue(
@@ -416,7 +416,7 @@ Friend Module RegressionProgram
                     End Function),
                 "復号エラーIssueがありません。")
         Finally
-            Directory.Delete(directory, True)
+            System.IO.Directory.Delete(tempDirectory, True)
         End Try
     End Sub
 
@@ -446,29 +446,31 @@ Friend Module RegressionProgram
 
     Private Function ExportToTemporaryText(document As CsvDocument,
                                            newLine As String) As String
-        Dim directory As String = CreateTemporaryDirectory("CSViewerExportTests_")
+        Dim tempDirectory As String = CreateTemporaryDirectory("CSViewerExportTests_")
         Try
-            Dim path As String = Path.Combine(directory, "output.csv")
+            Dim outputPath As String = System.IO.Path.Combine(tempDirectory, "output.csv")
             Dim table As DataTable = CsvTableBuilder.Build(document)
             CsvExporter.Export(
-                path,
+                outputPath,
                 table.DefaultView,
                 CsvTableBuilder.GetVisibleColumnCount(table),
                 document.Delimiter,
                 document.HasHeader,
                 CsvTextEncoding.Utf8NoBom,
                 newLine)
-            Return File.ReadAllText(path, New UTF8Encoding(False))
+            Return File.ReadAllText(outputPath, New UTF8Encoding(False))
         Finally
-            Directory.Delete(directory, True)
+            System.IO.Directory.Delete(tempDirectory, True)
         End Try
     End Function
 
     Private Function CreateTemporaryDirectory(prefix As String) As String
-        Dim directory As String =
-            Path.Combine(Path.GetTempPath(), prefix & Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(directory)
-        Return directory
+        Dim tempDirectory As String =
+            System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                prefix & Guid.NewGuid().ToString("N"))
+        System.IO.Directory.CreateDirectory(tempDirectory)
+        Return tempDirectory
     End Function
 
     Private Sub AssertTrue(condition As Boolean, message As String)
