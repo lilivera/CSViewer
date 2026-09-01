@@ -1,0 +1,96 @@
+name: Release v1.0.1
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.head_commit.message == 'Release v1.0.1'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        shell: cmd
+        run: msbuild CsvPreviewer.sln /t:Rebuild /p:Configuration=Release /m
+
+      - name: Regression tests
+        shell: cmd
+        run: CsvPreviewer.SmokeTests\bin\Release\CsvPreviewer.SmokeTests.exe
+
+      - name: Package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '1.0.1'
+          $packageDir = Join-Path $env:RUNNER_TEMP 'CSViewer-package'
+          $zipPath = Join-Path $PWD "CSViewer-v$version-win-anycpu.zip"
+
+          if (Test-Path $packageDir) { Remove-Item $packageDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $packageDir | Out-Null
+
+          Copy-Item 'CsvPreviewer\bin\Release\CSViewer.exe' $packageDir
+          Copy-Item 'CsvPreviewer\bin\Release\CSViewer.exe.config' $packageDir
+          Copy-Item 'README.md' $packageDir
+          Copy-Item 'LICENSE' $packageDir
+
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $zipPath -CompressionLevel Optimal
+
+          $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToUpperInvariant()
+          "RELEASE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create release notes
+        shell: powershell
+        run: |
+          $notes = @"
+          CSViewer v1.0.1 は、v1.0.0 以降に確認された不具合・データ保全・性能問題を修正したメンテナンスリリースです。
+
+          ## 主な修正
+
+          - CSV構文エラー検出と列数推定を改善
+          - UTF-8 / Shift_JIS / BOMなしUTF-16 の文字コード判定を改善
+          - SQLの列参照、DISTINCT、COUNT/LIMIT、キャンセル処理を修正
+          - malformedレコードの原文確認・検索を改善
+          - 大容量CSVの検索・読み込み時の負荷を軽減
+          - TSV保存時の拡張子を修正
+          - 元ファイル上書き後の表示内容を再読込して整合性を維持
+          - 復号エラー状態での元ファイル上書きを禁止
+          - 外部更新されたCSVへの上書き競合を検知
+
+          ## 動作要件
+
+          - Windows
+          - .NET Framework 4.8
+
+          ## 検証
+
+          - Release / Any CPU ビルド成功
+          - 回帰テスト 24件 成功
+
+          SHA-256: `$env:RELEASE_SHA256`
+          "@
+          Set-Content -Path 'release-notes.md' -Value $notes -Encoding UTF8
+
+      - name: Publish GitHub release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.0.1 `
+            'CSViewer-v1.0.1-win-anycpu.zip#Windows Any CPU (.NET Framework 4.8)' `
+            --repo '${{ github.repository }}' `
+            --target '${{ github.sha }}' `
+            --title 'CSViewer v1.0.1' `
+            --notes-file 'release-notes.md' `
+            --latest
