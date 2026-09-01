@@ -78,19 +78,33 @@ jobs:
           - Release / Any CPU ビルド成功
           - 回帰テスト 24件 成功
 
-          SHA-256: `$env:RELEASE_SHA256`
+          SHA-256: $env:RELEASE_SHA256
           "@
-          Set-Content -Path 'release-notes.md' -Value $notes -Encoding UTF8
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'release-notes.md'), $notes, $utf8NoBom)
 
       - name: Publish GitHub release
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.1 `
-            'CSViewer-v1.0.1-win-anycpu.zip#Windows Any CPU (.NET Framework 4.8)' `
-            --repo '${{ github.repository }}' `
-            --target '${{ github.sha }}' `
-            --title 'CSViewer v1.0.1' `
-            --notes-file 'release-notes.md' `
-            --latest
+          $repo = '${{ github.repository }}'
+          $tag = 'v1.0.1'
+          $asset = 'CSViewer-v1.0.1-win-anycpu.zip#Windows Any CPU (.NET Framework 4.8)'
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag `
+              --repo $repo `
+              --title 'CSViewer v1.0.1' `
+              --notes-file 'release-notes.md' `
+              --latest
+            gh release upload $tag $asset --repo $repo --clobber
+          } else {
+            gh release create $tag $asset `
+              --repo $repo `
+              --target '${{ github.sha }}' `
+              --title 'CSViewer v1.0.1' `
+              --notes-file 'release-notes.md' `
+              --latest
+          }
