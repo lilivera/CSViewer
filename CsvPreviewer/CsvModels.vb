@@ -77,12 +77,14 @@ Public NotInheritable Class CsvIssue
                    lineNumber As Long,
                    recordNumber As Integer,
                    category As String,
-                   message As String)
+                   message As String,
+                   Optional columnIndex As Integer = -1)
         Me.Severity = severity
         Me.LineNumber = lineNumber
         Me.RecordNumber = recordNumber
         Me.Category = category
         Me.Message = message
+        Me.ColumnIndex = columnIndex
     End Sub
 
     Public ReadOnly Property Severity As CsvIssueSeverity
@@ -90,6 +92,7 @@ Public NotInheritable Class CsvIssue
     Public ReadOnly Property RecordNumber As Integer
     Public ReadOnly Property Category As String
     Public ReadOnly Property Message As String
+    Public ReadOnly Property ColumnIndex As Integer
 End Class
 
 Public NotInheritable Class LineEndingInfo
@@ -133,9 +136,11 @@ Public NotInheritable Class CsvDocument
     Public Property FilePath As String
     Public Property FileSize As Long
     Public Property LastWriteTime As DateTime
+    Public Property LastWriteTimeUtc As DateTime
     Public Property EncodingKind As CsvTextEncoding
     Public Property EncodingDisplayName As String
     Public Property HasBom As Boolean
+    Public Property IsLossyDecode As Boolean
     Public Property Delimiter As String
     Public Property HasHeader As Boolean
     Public Property ExpectedColumnCount As Integer
