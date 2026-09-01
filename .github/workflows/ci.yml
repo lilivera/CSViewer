@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - fix/**
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        shell: cmd
+        run: msbuild CsvPreviewer.sln /t:Rebuild /p:Configuration=Release /m
+
+      - name: Smoke tests
+        shell: cmd
+        run: CsvPreviewer.SmokeTests\bin\Release\CsvPreviewer.SmokeTests.exe

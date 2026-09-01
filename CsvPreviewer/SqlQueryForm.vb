@@ -1,6 +1,7 @@
 Imports System
 Imports System.Data
 Imports System.Drawing
+Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
 
@@ -11,9 +12,12 @@ Public NotInheritable Class SqlQueryForm
     Private ReadOnly _visibleColumnCount As Integer
     Private ReadOnly _queryTextBox As TextBox
     Private ReadOnly _executeButton As Button
+    Private ReadOnly _closeButton As Button
     Private ReadOnly _resultGrid As BufferedDataGridView
     Private ReadOnly _statusLabel As ToolStripStatusLabel
     Private _executing As Boolean
+    Private _cancellation As CancellationTokenSource
+    Private _closeWhenCancelled As Boolean
 
     Public Sub New(source As DataTable, visibleColumnCount As Integer)
         If source Is Nothing Then Throw New ArgumentNullException("source")
@@ -85,16 +89,16 @@ Public NotInheritable Class SqlQueryForm
         filterExampleButton.AutoSize = True
         filterExampleButton.MinimumSize = New Size(88, 30)
 
-        Dim closeButtonValue As New Button()
-        closeButtonValue.Text = "閉じる"
-        closeButtonValue.AutoSize = True
-        closeButtonValue.MinimumSize = New Size(88, 30)
-        closeButtonValue.DialogResult = DialogResult.Cancel
+        _closeButton = New Button()
+        _closeButton.Text = "閉じる"
+        _closeButton.AutoSize = True
+        _closeButton.MinimumSize = New Size(112, 30)
+        _closeButton.DialogResult = DialogResult.Cancel
 
         buttonPanel.Controls.Add(_executeButton)
         buttonPanel.Controls.Add(countExampleButton)
         buttonPanel.Controls.Add(filterExampleButton)
-        buttonPanel.Controls.Add(closeButtonValue)
+        buttonPanel.Controls.Add(_closeButton)
 
         _resultGrid = New BufferedDataGridView()
         _resultGrid.Dock = DockStyle.Fill
@@ -106,8 +110,7 @@ Public NotInheritable Class SqlQueryForm
         _resultGrid.AutoGenerateColumns = True
         _resultGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None
         _resultGrid.BackgroundColor = Color.White
-        _resultGrid.ClipboardCopyMode =
-            DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText
+        _resultGrid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText
         _resultGrid.SelectionMode = DataGridViewSelectionMode.CellSelect
         _resultGrid.MultiSelect = True
 
@@ -125,7 +128,7 @@ Public NotInheritable Class SqlQueryForm
 
         Controls.Add(rootLayout)
         Controls.Add(statusStrip)
-        CancelButton = closeButtonValue
+        CancelButton = _closeButton
 
         AddHandler _executeButton.Click, AddressOf ExecuteButtonClick
         AddHandler countExampleButton.Click, AddressOf CountExampleButtonClick
@@ -135,13 +138,25 @@ Public NotInheritable Class SqlQueryForm
 
     Protected Overrides Function ProcessCmdKey(ByRef msg As Message,
                                                keyData As Keys) As Boolean
-        If keyData = Keys.F5 OrElse
-           keyData = (Keys.Control Or Keys.Enter) Then
+        If keyData = Keys.F5 OrElse keyData = (Keys.Control Or Keys.Enter) Then
             ExecuteQuery()
             Return True
         End If
         Return MyBase.ProcessCmdKey(msg, keyData)
     End Function
+
+    Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
+        If _executing AndAlso _cancellation IsNot Nothing Then
+            _closeWhenCancelled = True
+            _cancellation.Cancel()
+            _statusLabel.ForeColor = SystemColors.ControlText
+            _statusLabel.Text = "SQLをキャンセルしています..."
+            _closeButton.Enabled = False
+            e.Cancel = True
+            Return
+        End If
+        MyBase.OnFormClosing(e)
+    End Sub
 
     Private Sub ExecuteButtonClick(sender As Object, e As EventArgs)
         ExecuteQuery()
@@ -167,6 +182,9 @@ Public NotInheritable Class SqlQueryForm
     Private Async Sub ExecuteQuery()
         If _executing Then Return
         Dim sql As String = _queryTextBox.Text
+        Dim cancellation As New CancellationTokenSource()
+        _cancellation = cancellation
+        _closeWhenCancelled = False
         SetExecutingState(True)
 
         Try
@@ -175,7 +193,8 @@ Public NotInheritable Class SqlQueryForm
                     Function() CsvSqlEngine.Execute(
                         _source,
                         _visibleColumnCount,
-                        sql))
+                        sql,
+                        cancellation.Token))
             If IsDisposed Then Return
 
             _resultGrid.DataSource = result.Table
@@ -185,6 +204,11 @@ Public NotInheritable Class SqlQueryForm
                     "一致 {0:N0} 行 / 結果 {1:N0} 行",
                     result.MatchedRowCount,
                     result.ReturnedRowCount)
+        Catch ex As OperationCanceledException
+            If Not IsDisposed Then
+                _statusLabel.ForeColor = SystemColors.ControlText
+                _statusLabel.Text = "SQLをキャンセルしました。"
+            End If
         Catch ex As CsvSqlException
             If Not IsDisposed Then ShowQueryError(ex.Message)
         Catch ex As Exception
@@ -192,7 +216,18 @@ Public NotInheritable Class SqlQueryForm
                 ShowQueryError("SQLの実行中にエラーが発生しました: " & ex.Message)
             End If
         Finally
-            If Not IsDisposed Then SetExecutingState(False)
+            If Object.ReferenceEquals(_cancellation, cancellation) Then
+                _cancellation = Nothing
+            End If
+            cancellation.Dispose()
+
+            If Not IsDisposed Then
+                SetExecutingState(False)
+                If _closeWhenCancelled Then
+                    _closeWhenCancelled = False
+                    BeginInvoke(New MethodInvoker(AddressOf Close))
+                End If
+            End If
         End Try
     End Sub
 
@@ -200,6 +235,8 @@ Public NotInheritable Class SqlQueryForm
         _executing = executing
         _executeButton.Enabled = Not executing
         _queryTextBox.ReadOnly = executing
+        _closeButton.Enabled = True
+        _closeButton.Text = If(executing, "キャンセルして閉じる", "閉じる")
         Cursor = If(executing, Cursors.WaitCursor, Cursors.Default)
         If executing Then
             _statusLabel.ForeColor = SystemColors.ControlText

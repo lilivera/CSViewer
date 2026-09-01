@@ -29,10 +29,12 @@ Public NotInheritable Class CsvParser
         document.FilePath = fileInfo.FullName
         document.FileSize = fileInfo.Length
         document.LastWriteTime = fileInfo.LastWriteTime
+        document.LastWriteTimeUtc = fileInfo.LastWriteTimeUtc
         document.EncodingKind = decoded.EncodingKind
         document.EncodingDisplayName = decoded.EncodingDisplayName
         document.HasBom = decoded.HasBom
-        document.LineEnding = CsvTextCodec.DetectLineEndings(decoded.Text)
+        document.IsLossyDecode = decoded.UsedReplacementCharacter
+        document.LineEnding = DetectRecordLineEndings(decoded.Text, delimiter)
 
         If decoded.UsedReplacementCharacter Then
             document.Issues.Insert(
@@ -72,7 +74,7 @@ Public NotInheritable Class CsvParser
         Dim document As New CsvDocument() With {
             .Delimiter = delimiter,
             .HasHeader = hasHeader,
-            .LineEnding = CsvTextCodec.DetectLineEndings(text)
+            .LineEnding = DetectRecordLineEndings(text, delimiter)
         }
 
         ParseRecords(text, delimiter, Integer.MaxValue, document)
@@ -108,6 +110,159 @@ Public NotInheritable Class CsvParser
         Next
 
         Return bestDelimiter
+    End Function
+
+    Public Shared Function DetectRecordLineEndings(text As String,
+                                                   delimiter As String) As LineEndingInfo
+        If text Is Nothing Then Throw New ArgumentNullException("text")
+        If String.IsNullOrEmpty(delimiter) Then
+            Throw New ArgumentException("区切り文字が指定されていません。", "delimiter")
+        End If
+
+        Dim crLfCount As Integer = 0
+        Dim lfCount As Integer = 0
+        Dim crCount As Integer = 0
+        Dim index As Integer = 0
+        Dim atFieldStart As Boolean = True
+        Dim inQuotes As Boolean = False
+        Dim afterClosingQuote As Boolean = False
+        Dim malformed As Boolean = False
+
+        While index < text.Length
+            Dim newLineLength As Integer = GetNewLineLength(text, index)
+
+            If inQuotes Then
+                If text(index) = ControlChars.Quote Then
+                    If index + 1 < text.Length AndAlso
+                       text(index + 1) = ControlChars.Quote Then
+                        index += 2
+                    Else
+                        inQuotes = False
+                        afterClosingQuote = True
+                        index += 1
+                    End If
+                ElseIf newLineLength > 0 Then
+                    index += newLineLength
+                Else
+                    index += 1
+                End If
+                Continue While
+            End If
+
+            If malformed Then
+                If newLineLength > 0 Then
+                    CountLineEnding(text, index, newLineLength, crLfCount, lfCount, crCount)
+                    index += newLineLength
+                    atFieldStart = True
+                    afterClosingQuote = False
+                    malformed = False
+                Else
+                    index += 1
+                End If
+                Continue While
+            End If
+
+            If afterClosingQuote Then
+                If IsDelimiterAt(text, index, delimiter) Then
+                    index += delimiter.Length
+                    atFieldStart = True
+                    afterClosingQuote = False
+                ElseIf newLineLength > 0 Then
+                    CountLineEnding(text, index, newLineLength, crLfCount, lfCount, crCount)
+                    index += newLineLength
+                    atFieldStart = True
+                    afterClosingQuote = False
+                ElseIf text(index) = " "c OrElse text(index) = ControlChars.Tab Then
+                    index += 1
+                Else
+                    malformed = True
+                    afterClosingQuote = False
+                    index += 1
+                End If
+                Continue While
+            End If
+
+            If newLineLength > 0 Then
+                CountLineEnding(text, index, newLineLength, crLfCount, lfCount, crCount)
+                index += newLineLength
+                atFieldStart = True
+                Continue While
+            End If
+
+            If IsDelimiterAt(text, index, delimiter) Then
+                index += delimiter.Length
+                atFieldStart = True
+                Continue While
+            End If
+
+            If text(index) = ControlChars.Quote Then
+                If atFieldStart Then
+                    inQuotes = True
+                    atFieldStart = False
+                Else
+                    malformed = True
+                End If
+                index += 1
+                Continue While
+            End If
+
+            atFieldStart = False
+            index += 1
+        End While
+
+        Return CreateLineEndingInfo(crLfCount, lfCount, crCount)
+    End Function
+
+    Private Shared Sub CountLineEnding(text As String,
+                                       index As Integer,
+                                       length As Integer,
+                                       ByRef crLfCount As Integer,
+                                       ByRef lfCount As Integer,
+                                       ByRef crCount As Integer)
+        If length = 2 Then
+            crLfCount += 1
+        ElseIf text(index) = ControlChars.Lf Then
+            lfCount += 1
+        Else
+            crCount += 1
+        End If
+    End Sub
+
+    Private Shared Function CreateLineEndingInfo(crLfCount As Integer,
+                                                 lfCount As Integer,
+                                                 crCount As Integer) As LineEndingInfo
+        Dim kinds As Integer = 0
+        If crLfCount > 0 Then kinds += 1
+        If lfCount > 0 Then kinds += 1
+        If crCount > 0 Then kinds += 1
+
+        Dim preferred As String = Environment.NewLine
+        If lfCount > crLfCount AndAlso lfCount >= crCount Then
+            preferred = ControlChars.Lf
+        ElseIf crCount > crLfCount AndAlso crCount > lfCount Then
+            preferred = ControlChars.Cr
+        ElseIf crLfCount > 0 Then
+            preferred = ControlChars.CrLf
+        End If
+
+        Dim displayName As String
+        If kinds = 0 Then
+            displayName = "改行なし"
+        ElseIf kinds > 1 Then
+            displayName = String.Format(
+                "混在（CRLF:{0} / LF:{1} / CR:{2}）",
+                crLfCount,
+                lfCount,
+                crCount)
+        ElseIf crLfCount > 0 Then
+            displayName = "CRLF"
+        ElseIf lfCount > 0 Then
+            displayName = "LF"
+        Else
+            displayName = "CR"
+        End If
+
+        Return New LineEndingInfo(displayName, preferred, crLfCount, lfCount, crCount)
     End Function
 
     Private Shared Function ReadColumnCounts(text As String,
@@ -209,7 +364,7 @@ Public NotInheritable Class CsvParser
                         recordNumber,
                         recordStartLine,
                         fields,
-                        text.Substring(recordStartIndex, index - recordStartIndex),
+                        Nothing,
                         False,
                         0)
                     recordNumber += 1
@@ -239,7 +394,7 @@ Public NotInheritable Class CsvParser
                     recordNumber,
                     recordStartLine,
                     fields,
-                    text.Substring(recordStartIndex, index - recordStartIndex),
+                    Nothing,
                     False,
                     0)
                 recordNumber += 1
@@ -261,10 +416,16 @@ Public NotInheritable Class CsvParser
                 Continue While
             End If
 
-            If atFieldStart AndAlso text(index) = ControlChars.Quote Then
-                inQuotes = True
-                atFieldStart = False
-                index += 1
+            If text(index) = ControlChars.Quote Then
+                If atFieldStart Then
+                    inQuotes = True
+                    atFieldStart = False
+                    index += 1
+                Else
+                    malformed = True
+                    malformedLine = currentLine
+                    index += 1
+                End If
                 Continue While
             End If
 
@@ -282,12 +443,14 @@ Public NotInheritable Class CsvParser
         End If
 
         fields.Add(field.ToString())
+        Dim originalText As String = Nothing
+        If malformed Then originalText = text.Substring(recordStartIndex)
         AddParsedRecord(
             document,
             recordNumber,
             recordStartLine,
             fields,
-            text.Substring(recordStartIndex),
+            originalText,
             malformed,
             malformedLine)
     End Sub
@@ -374,8 +537,11 @@ Public NotInheritable Class CsvParser
             Return
         End If
 
-        Dim expectedIndex As Integer = If(document.HasHeader, 0, document.DataStartIndex)
-        document.ExpectedColumnCount = document.Records(expectedIndex).Fields.Length
+        If document.HasHeader AndAlso Not document.Records(0).IsMalformed Then
+            document.ExpectedColumnCount = document.Records(0).Fields.Length
+        Else
+            document.ExpectedColumnCount = InferExpectedColumnCount(document)
+        End If
 
         For index As Integer = document.DataStartIndex To document.Records.Count - 1
             Dim record As CsvRecord = document.Records(index)
@@ -396,6 +562,31 @@ Public NotInheritable Class CsvParser
         Next
     End Sub
 
+    Private Shared Function InferExpectedColumnCount(document As CsvDocument) As Integer
+        Dim frequencies As New Dictionary(Of Integer, Integer)()
+        For index As Integer = document.DataStartIndex To document.Records.Count - 1
+            Dim record As CsvRecord = document.Records(index)
+            If record.IsMalformed Then Continue For
+            Dim count As Integer = record.Fields.Length
+            If Not frequencies.ContainsKey(count) Then frequencies.Add(count, 0)
+            frequencies(count) += 1
+        Next
+
+        Dim bestCount As Integer = 0
+        Dim bestFrequency As Integer = 0
+        For Each pair As KeyValuePair(Of Integer, Integer) In frequencies
+            If pair.Value > bestFrequency OrElse
+               (pair.Value = bestFrequency AndAlso pair.Key > bestCount) Then
+                bestCount = pair.Key
+                bestFrequency = pair.Value
+            End If
+        Next
+
+        If bestFrequency > 0 Then Return bestCount
+        If document.Records.Count > 0 Then Return document.Records(0).Fields.Length
+        Return 0
+    End Function
+
     Private Shared Sub AnalyzeHeader(document As CsvDocument)
         If Not document.HasHeader OrElse document.Records.Count = 0 Then Return
 
@@ -411,7 +602,8 @@ Public NotInheritable Class CsvParser
                         header.StartLineNumber,
                         header.RecordNumber,
                         "ヘッダー",
-                        String.Format("{0}列目のヘッダー名が空です。", index + 1)))
+                        String.Format("{0}列目のヘッダー名が空です。", index + 1),
+                        index))
                 Continue For
             End If
 
@@ -422,7 +614,8 @@ Public NotInheritable Class CsvParser
                         header.StartLineNumber,
                         header.RecordNumber,
                         "ヘッダー",
-                        String.Format("ヘッダー名「{0}」が重複しています。", name)))
+                        String.Format("ヘッダー名「{0}」が重複しています。", name),
+                        index))
             Else
                 names.Add(name, index)
             End If

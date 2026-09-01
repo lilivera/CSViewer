@@ -2,7 +2,6 @@ Imports System
 Imports System.Data
 Imports System.Drawing
 Imports System.IO
-Imports System.Text
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
 
@@ -34,6 +33,7 @@ Public NotInheritable Class MainForm
     Private _table As DataTable
     Private _view As DataView
     Private _loading As Boolean
+    Private _searching As Boolean
 
     Private NotInheritable Class LoadedCsv
         Public Sub New(document As CsvDocument, table As DataTable)
@@ -198,6 +198,8 @@ Public NotInheritable Class MainForm
         _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize
         _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(52, 104, 171)
         _grid.DefaultCellStyle.SelectionForeColor = Color.White
+        _grid.RowsDefaultCellStyle.BackColor = Color.White
+        _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(247, 249, 252)
         _grid.MultiSelect = True
         _grid.RowHeadersWidth = 72
         _grid.RowTemplate.Height = 24
@@ -260,6 +262,7 @@ Public NotInheritable Class MainForm
         AddHandler _headerCheckBox.CheckedChanged, AddressOf LoadOptionChanged
         AddHandler _grid.DataBindingComplete, AddressOf GridDataBindingComplete
         AddHandler _grid.RowPostPaint, AddressOf GridRowPostPaint
+        AddHandler _grid.CellFormatting, AddressOf GridCellFormatting
         AddHandler _grid.Sorted, AddressOf GridSorted
         AddHandler _issuesListView.DoubleClick, AddressOf IssuesListViewDoubleClick
         AddHandler DragEnter, AddressOf MainFormDragEnter
@@ -281,28 +284,23 @@ Public NotInheritable Class MainForm
             OpenFileUsingDialog()
             Return True
         End If
-
         If keyData = (Keys.Control Or Keys.S) Then
             ExportCurrentView()
             Return True
         End If
-
         If keyData = Keys.F5 Then
             ReloadCurrentFile()
             Return True
         End If
-
         If keyData = (Keys.Control Or Keys.F) Then
             _searchTextBox.Focus()
             _searchTextBox.SelectAll()
             Return True
         End If
-
         If keyData = (Keys.Control Or Keys.Q) Then
             ShowSqlQuery()
             Return True
         End If
-
         Return MyBase.ProcessCmdKey(msg, keyData)
     End Function
 
@@ -354,13 +352,24 @@ Public NotInheritable Class MainForm
     Private Sub GridDataBindingComplete(sender As Object,
                                         e As DataGridViewBindingCompleteEventArgs)
         ConfigureGridColumns()
-        ApplyRowStyles()
+        _grid.Invalidate()
         UpdateStatus()
     End Sub
 
     Private Sub GridSorted(sender As Object, e As EventArgs)
-        ApplyRowStyles()
+        _grid.Invalidate()
         UpdateStatus()
+    End Sub
+
+    Private Sub GridCellFormatting(sender As Object,
+                                   e As DataGridViewCellFormattingEventArgs)
+        If e.RowIndex < 0 OrElse e.RowIndex >= _grid.Rows.Count Then Return
+        Dim rowView As DataRowView =
+            TryCast(_grid.Rows(e.RowIndex).DataBoundItem, DataRowView)
+        If rowView Is Nothing Then Return
+        If Convert.ToBoolean(rowView(CsvTableBuilder.HasIssueColumn)) Then
+            e.CellStyle.BackColor = Color.MistyRose
+        End If
     End Sub
 
     Private Sub GridRowPostPaint(sender As Object,
@@ -392,25 +401,109 @@ Public NotInheritable Class MainForm
     Private Sub IssuesListViewDoubleClick(sender As Object, e As EventArgs)
         If _issuesListView.SelectedItems.Count = 0 Then Return
 
-        Dim issue As CsvIssue =
-            TryCast(_issuesListView.SelectedItems(0).Tag, CsvIssue)
-        If issue Is Nothing OrElse issue.RecordNumber <= 0 Then Return
+        Dim issue As CsvIssue = TryCast(_issuesListView.SelectedItems(0).Tag, CsvIssue)
+        If issue Is Nothing Then Return
 
-        For Each gridRow As DataGridViewRow In _grid.Rows
-            Dim rowView As DataRowView =
-                TryCast(gridRow.DataBoundItem, DataRowView)
-            If rowView Is Nothing Then Continue For
+        If issue.Category = "ヘッダー" AndAlso issue.ColumnIndex >= 0 Then
+            ShowHeaderIssue(issue)
+            Return
+        End If
 
-            If Convert.ToInt32(rowView(CsvTableBuilder.RecordNumberColumn)) =
-               issue.RecordNumber Then
-                _grid.ClearSelection()
-                If gridRow.Cells.Count > 0 Then
-                    gridRow.Cells(0).Selected = True
-                    _grid.CurrentCell = gridRow.Cells(0)
-                End If
-                _grid.FirstDisplayedScrollingRowIndex = gridRow.Index
+        If issue.RecordNumber <= 0 Then
+            ShowIssueDetails(issue)
+            Return
+        End If
+
+        If TrySelectRecord(issue.RecordNumber) Then
+            ShowMalformedOriginalIfNeeded(issue.RecordNumber)
+            Return
+        End If
+
+        If _view IsNot Nothing AndAlso Not String.IsNullOrEmpty(_view.RowFilter) Then
+            _searchTextBox.Clear()
+            _view.RowFilter = String.Empty
+            UpdateStatus()
+            If TrySelectRecord(issue.RecordNumber) Then
+                ShowMalformedOriginalIfNeeded(issue.RecordNumber)
                 Return
             End If
+        End If
+
+        ShowIssueDetails(issue)
+    End Sub
+
+    Private Function TrySelectRecord(recordNumber As Integer) As Boolean
+        For Each gridRow As DataGridViewRow In _grid.Rows
+            Dim rowView As DataRowView = TryCast(gridRow.DataBoundItem, DataRowView)
+            If rowView Is Nothing Then Continue For
+            If Convert.ToInt32(rowView(CsvTableBuilder.RecordNumberColumn)) <> recordNumber Then
+                Continue For
+            End If
+
+            _grid.ClearSelection()
+            If gridRow.Cells.Count > 0 Then
+                gridRow.Cells(0).Selected = True
+                _grid.CurrentCell = gridRow.Cells(0)
+            End If
+            _grid.FirstDisplayedScrollingRowIndex = gridRow.Index
+            Return True
+        Next
+        Return False
+    End Function
+
+    Private Sub ShowHeaderIssue(issue As CsvIssue)
+        If issue.ColumnIndex >= 0 AndAlso issue.ColumnIndex < _grid.Columns.Count Then
+            Dim column As DataGridViewColumn = _grid.Columns(issue.ColumnIndex)
+            If column.Visible Then
+                _grid.FirstDisplayedScrollingColumnIndex = column.Index
+                If _grid.Rows.Count > 0 Then
+                    _grid.ClearSelection()
+                    _grid.CurrentCell = _grid.Rows(0).Cells(column.Index)
+                    _grid.CurrentCell.Selected = True
+                End If
+            End If
+        End If
+
+        Dim detail As String = issue.Message
+        If _table IsNot Nothing AndAlso
+           _table.ExtendedProperties.Contains(CsvTableBuilder.OriginalHeaderTextProperty) Then
+            Dim rawHeader As String = Convert.ToString(
+                _table.ExtendedProperties(CsvTableBuilder.OriginalHeaderTextProperty))
+            If rawHeader.Length > 0 Then
+                detail &= Environment.NewLine & Environment.NewLine &
+                          "ヘッダー原文:" & Environment.NewLine & rawHeader
+            End If
+        End If
+        MessageBox.Show(Me, detail, "ヘッダーの問題", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+    End Sub
+
+    Private Sub ShowIssueDetails(issue As CsvIssue)
+        MessageBox.Show(
+            Me,
+            issue.Message,
+            issue.Category,
+            MessageBoxButtons.OK,
+            If(issue.Severity = CsvIssueSeverity.[Error],
+               MessageBoxIcon.Error,
+               MessageBoxIcon.Warning))
+    End Sub
+
+    Private Sub ShowMalformedOriginalIfNeeded(recordNumber As Integer)
+        If _table Is Nothing Then Return
+        For Each row As DataRow In _table.Rows
+            If Convert.ToInt32(row(CsvTableBuilder.RecordNumberColumn)) <> recordNumber Then
+                Continue For
+            End If
+            If Not Convert.ToBoolean(row(CsvTableBuilder.IsMalformedColumn)) Then Return
+            Dim originalText As String = Convert.ToString(row(CsvTableBuilder.OriginalRecordTextColumn))
+            If originalText.Length = 0 Then Return
+            MessageBox.Show(
+                Me,
+                originalText,
+                "CSV構文エラー行の原文",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information)
+            Return
         Next
     End Sub
 
@@ -424,15 +517,13 @@ Public NotInheritable Class MainForm
 
     Private Sub MainFormDragDrop(sender As Object, e As DragEventArgs)
         If e.Data Is Nothing Then Return
-
-        Dim paths As String() =
-            TryCast(e.Data.GetData(DataFormats.FileDrop), String())
+        Dim paths As String() = TryCast(e.Data.GetData(DataFormats.FileDrop), String())
         If paths Is Nothing OrElse paths.Length = 0 Then Return
         If File.Exists(paths(0)) Then LoadCsv(paths(0))
     End Sub
 
     Private Sub OpenFileUsingDialog()
-        If _loading Then Return
+        If _loading OrElse _searching Then Return
 
         Using dialog As New OpenFileDialog()
             dialog.Title = "CSVファイルを開く"
@@ -443,8 +534,7 @@ Public NotInheritable Class MainForm
             dialog.CheckFileExists = True
             dialog.Multiselect = False
 
-            If _document IsNot Nothing AndAlso
-               Not String.IsNullOrEmpty(_document.FilePath) Then
+            If _document IsNot Nothing AndAlso Not String.IsNullOrEmpty(_document.FilePath) Then
                 dialog.InitialDirectory = Path.GetDirectoryName(_document.FilePath)
             End If
 
@@ -455,16 +545,13 @@ Public NotInheritable Class MainForm
     End Sub
 
     Private Sub ReloadCurrentFile()
-        If _document Is Nothing OrElse
-           String.IsNullOrEmpty(_document.FilePath) Then
-            Return
-        End If
-
+        If _document Is Nothing OrElse String.IsNullOrEmpty(_document.FilePath) Then Return
         LoadCsv(_document.FilePath)
     End Sub
 
-    Private Async Sub LoadCsv(filePath As String)
-        If _loading Then Return
+    Private Async Sub LoadCsv(filePath As String,
+                              Optional optionsOverride As CsvLoadOptions = Nothing)
+        If _loading OrElse _searching Then Return
 
         If Not File.Exists(filePath) Then
             MessageBox.Show(
@@ -476,18 +563,17 @@ Public NotInheritable Class MainForm
             Return
         End If
 
-        Dim options As CsvLoadOptions = BuildLoadOptions()
+        Dim options As CsvLoadOptions = If(optionsOverride, BuildLoadOptions())
         SetLoadingState(True)
+        If optionsOverride IsNot Nothing Then ApplyLoadOptionsToControls(optionsOverride)
         _statusFileLabel.Text = "読み込み中..."
 
         Try
             Dim loaded As LoadedCsv =
                 Await Task.Run(
                     Function() As LoadedCsv
-                        Dim document As CsvDocument =
-                            CsvParser.Load(filePath, options)
-                        Dim table As DataTable =
-                            CsvTableBuilder.Build(document)
+                        Dim document As CsvDocument = CsvParser.Load(filePath, options)
+                        Dim table As DataTable = CsvTableBuilder.Build(document)
                         document.ReleaseRecordStorage()
                         Return New LoadedCsv(document, table)
                     End Function)
@@ -506,15 +592,14 @@ Public NotInheritable Class MainForm
 
             PopulateIssues()
             ConfigureGridColumns()
-            ApplyRowStyles()
+            _grid.Invalidate()
             UpdateStatus()
         Catch ex As Exception
             If Not IsDisposed Then
                 MessageBox.Show(
                     Me,
                     "CSVファイルを読み込めませんでした。" &
-                    Environment.NewLine & Environment.NewLine &
-                    ex.Message,
+                    Environment.NewLine & Environment.NewLine & ex.Message,
                     "読み込みエラー",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error)
@@ -525,31 +610,66 @@ Public NotInheritable Class MainForm
         End Try
     End Sub
 
+    Private Sub ApplyLoadOptionsToControls(options As CsvLoadOptions)
+        SelectOptionValue(_encodingComboBox,
+                          If(options.Encoding = CsvTextEncoding.Utf8Bom,
+                             CsvTextEncoding.Utf8NoBom,
+                             options.Encoding))
+        SelectOptionValue(_delimiterComboBox, options.Delimiter)
+        _headerCheckBox.Checked = options.HasHeader
+    End Sub
+
+    Private Shared Sub SelectOptionValue(Of T)(comboBox As ComboBox, value As T)
+        For index As Integer = 0 To comboBox.Items.Count - 1
+            Dim item As OptionItem(Of T) = TryCast(comboBox.Items(index), OptionItem(Of T))
+            If item IsNot Nothing AndAlso EqualityComparer(Of T).Default.Equals(item.Value, value) Then
+                comboBox.SelectedIndex = index
+                Return
+            End If
+        Next
+    End Sub
+
     Private Sub SetLoadingState(isLoading As Boolean)
         _loading = isLoading
         Cursor = If(isLoading, Cursors.WaitCursor, Cursors.Default)
-        _openButton.Enabled = Not isLoading
-        _reloadButton.Enabled = Not isLoading AndAlso _document IsNot Nothing
-        _exportButton.Enabled = Not isLoading AndAlso _document IsNot Nothing
-        _encodingComboBox.Enabled = Not isLoading
-        _delimiterComboBox.Enabled = Not isLoading
-        _headerCheckBox.Enabled = Not isLoading
-        _searchTextBox.Enabled = Not isLoading
-        _searchButton.Enabled = Not isLoading
-        _clearSearchButton.Enabled = Not isLoading
+        Dim enabled As Boolean = Not isLoading AndAlso Not _searching
+        _openButton.Enabled = enabled
+        _reloadButton.Enabled = enabled AndAlso _document IsNot Nothing
+        _exportButton.Enabled = enabled AndAlso _document IsNot Nothing
+        _encodingComboBox.Enabled = enabled
+        _delimiterComboBox.Enabled = enabled
+        _headerCheckBox.Enabled = enabled
+        _searchTextBox.Enabled = enabled
+        _searchButton.Enabled = enabled
+        _clearSearchButton.Enabled = enabled
         _sqlButton.Enabled =
-            Not isLoading AndAlso
-            _table IsNot Nothing AndAlso
+            enabled AndAlso _table IsNot Nothing AndAlso
             CsvTableBuilder.GetVisibleColumnCount(_table) > 0
     End Sub
 
+    Private Sub SetSearchingState(searching As Boolean)
+        _searching = searching
+        Cursor = If(searching, Cursors.WaitCursor, Cursors.Default)
+        Dim enabled As Boolean = Not searching AndAlso Not _loading
+        _openButton.Enabled = enabled
+        _reloadButton.Enabled = enabled AndAlso _document IsNot Nothing
+        _exportButton.Enabled = enabled AndAlso _document IsNot Nothing
+        _encodingComboBox.Enabled = enabled
+        _delimiterComboBox.Enabled = enabled
+        _headerCheckBox.Enabled = enabled
+        _searchTextBox.Enabled = enabled
+        _searchButton.Enabled = enabled
+        _clearSearchButton.Enabled = enabled
+        _sqlButton.Enabled =
+            enabled AndAlso _table IsNot Nothing AndAlso
+            CsvTableBuilder.GetVisibleColumnCount(_table) > 0
+        If searching Then _statusFileLabel.Text = "検索中..."
+    End Sub
+
     Private Sub ShowSqlQuery()
-        If _loading OrElse _table Is Nothing Then Return
-
-        Dim visibleColumnCount As Integer =
-            CsvTableBuilder.GetVisibleColumnCount(_table)
+        If _loading OrElse _searching OrElse _table Is Nothing Then Return
+        Dim visibleColumnCount As Integer = CsvTableBuilder.GetVisibleColumnCount(_table)
         If visibleColumnCount = 0 Then Return
-
         Using dialog As New SqlQueryForm(_table, visibleColumnCount)
             dialog.ShowDialog(Me)
         End Using
@@ -557,15 +677,12 @@ Public NotInheritable Class MainForm
 
     Private Function BuildLoadOptions() As CsvLoadOptions
         Dim options As New CsvLoadOptions()
-
         Dim encodingItem As OptionItem(Of CsvTextEncoding) =
-            TryCast(_encodingComboBox.SelectedItem,
-                    OptionItem(Of CsvTextEncoding))
+            TryCast(_encodingComboBox.SelectedItem, OptionItem(Of CsvTextEncoding))
         If encodingItem IsNot Nothing Then options.Encoding = encodingItem.Value
 
         Dim delimiterItem As OptionItem(Of CsvDelimiterOption) =
-            TryCast(_delimiterComboBox.SelectedItem,
-                    OptionItem(Of CsvDelimiterOption))
+            TryCast(_delimiterComboBox.SelectedItem, OptionItem(Of CsvDelimiterOption))
         If delimiterItem IsNot Nothing Then options.Delimiter = delimiterItem.Value
 
         options.HasHeader = _headerCheckBox.Checked
@@ -590,27 +707,7 @@ Public NotInheritable Class MainForm
                 gridColumn.MinimumWidth = 70
                 gridColumn.Width = Math.Min(
                     300,
-                    Math.Max(
-                        110,
-                        TextRenderer.MeasureText(dataColumn.Caption, Font).Width + 34))
-            End If
-        Next
-    End Sub
-
-    Private Sub ApplyRowStyles()
-        For Each gridRow As DataGridViewRow In _grid.Rows
-            Dim rowView As DataRowView =
-                TryCast(gridRow.DataBoundItem, DataRowView)
-            If rowView Is Nothing Then Continue For
-
-            Dim hasIssue As Boolean =
-                Convert.ToBoolean(rowView(CsvTableBuilder.HasIssueColumn))
-            If hasIssue Then
-                gridRow.DefaultCellStyle.BackColor = Color.MistyRose
-            ElseIf gridRow.Index Mod 2 = 1 Then
-                gridRow.DefaultCellStyle.BackColor = Color.FromArgb(247, 249, 252)
-            Else
-                gridRow.DefaultCellStyle.BackColor = Color.White
+                    Math.Max(110, TextRenderer.MeasureText(dataColumn.Caption, Font).Width + 34))
             End If
         Next
     End Sub
@@ -619,15 +716,10 @@ Public NotInheritable Class MainForm
         _issuesListView.BeginUpdate()
         Try
             _issuesListView.Items.Clear()
-
             For Each issue As CsvIssue In _document.Issues
                 Dim item As New ListViewItem(GetSeverityText(issue.Severity))
-                item.SubItems.Add(If(issue.LineNumber > 0,
-                                     issue.LineNumber.ToString(),
-                                     "-"))
-                item.SubItems.Add(If(issue.RecordNumber > 0,
-                                     issue.RecordNumber.ToString(),
-                                     "-"))
+                item.SubItems.Add(If(issue.LineNumber > 0, issue.LineNumber.ToString(), "-"))
+                item.SubItems.Add(If(issue.RecordNumber > 0, issue.RecordNumber.ToString(), "-"))
                 item.SubItems.Add(issue.Category)
                 item.SubItems.Add(issue.Message)
                 item.Tag = issue
@@ -637,7 +729,6 @@ Public NotInheritable Class MainForm
                 ElseIf issue.Severity = CsvIssueSeverity.Warning Then
                     item.ForeColor = Color.DarkOrange
                 End If
-
                 _issuesListView.Items.Add(item)
             Next
         Finally
@@ -650,49 +741,91 @@ Public NotInheritable Class MainForm
             _splitContainer.Panel2Collapsed = False
             If _splitContainer.Height >= 360 Then
                 _splitContainer.SplitterDistance =
-                    Math.Max(
-                        _splitContainer.Panel1MinSize,
-                        _splitContainer.Height - 150)
+                    Math.Max(_splitContainer.Panel1MinSize, _splitContainer.Height - 150)
             End If
         End If
     End Sub
 
-    Private Sub ApplySearch()
-        If _loading Then Return
-        If _view Is Nothing Then Return
+    Private Async Sub ApplySearch()
+        If _loading OrElse _searching OrElse _view Is Nothing OrElse _table Is Nothing Then Return
 
         Dim searchText As String = _searchTextBox.Text
         If String.IsNullOrEmpty(searchText) Then
             _view.RowFilter = String.Empty
-        Else
-            Dim visibleColumnCount As Integer =
-                CsvTableBuilder.GetVisibleColumnCount(_table)
-            For Each row As DataRow In _table.Rows
-                Dim isMatch As Boolean = False
-                For columnIndex As Integer = 0 To visibleColumnCount - 1
-                    Dim value As String = Convert.ToString(row(columnIndex))
-                    If value.IndexOf(
-                        searchText,
-                        StringComparison.CurrentCultureIgnoreCase) >= 0 Then
-                        isMatch = True
-                        Exit For
-                    End If
-                Next
-                row(CsvTableBuilder.SearchMatchColumn) = isMatch
-            Next
-            _view.RowFilter =
-                "[" & CsvTableBuilder.SearchMatchColumn & "] = True"
+            _grid.Invalidate()
+            UpdateStatus()
+            Return
         End If
 
-        ApplyRowStyles()
-        UpdateStatus()
+        Dim table As DataTable = _table
+        Dim visibleColumnCount As Integer = CsvTableBuilder.GetVisibleColumnCount(table)
+        SetSearchingState(True)
+
+        Try
+            Dim matches As Boolean() =
+                Await Task.Run(
+                    Function() As Boolean()
+                        Dim result(table.Rows.Count - 1) As Boolean
+                        For rowIndex As Integer = 0 To table.Rows.Count - 1
+                            Dim row As DataRow = table.Rows(rowIndex)
+                            Dim isMatch As Boolean = False
+                            For columnIndex As Integer = 0 To visibleColumnCount - 1
+                                Dim value As String = Convert.ToString(row(columnIndex))
+                                If value.IndexOf(
+                                    searchText,
+                                    StringComparison.CurrentCultureIgnoreCase) >= 0 Then
+                                    isMatch = True
+                                    Exit For
+                                End If
+                            Next
+
+                            If Not isMatch AndAlso
+                               Convert.ToBoolean(row(CsvTableBuilder.IsMalformedColumn)) Then
+                                Dim originalText As String =
+                                    Convert.ToString(row(CsvTableBuilder.OriginalRecordTextColumn))
+                                isMatch = originalText.IndexOf(
+                                    searchText,
+                                    StringComparison.CurrentCultureIgnoreCase) >= 0
+                            End If
+                            result(rowIndex) = isMatch
+                        Next
+                        Return result
+                    End Function)
+
+            If IsDisposed OrElse Not Object.ReferenceEquals(table, _table) Then Return
+
+            _view.RowFilter = String.Empty
+            table.BeginLoadData()
+            Try
+                For rowIndex As Integer = 0 To table.Rows.Count - 1
+                    table.Rows(rowIndex)(CsvTableBuilder.SearchMatchColumn) = matches(rowIndex)
+                Next
+            Finally
+                table.EndLoadData()
+            End Try
+            _view.RowFilter = "[" & CsvTableBuilder.SearchMatchColumn & "] = True"
+            _grid.Invalidate()
+            UpdateStatus()
+        Catch ex As Exception
+            If Not IsDisposed Then
+                MessageBox.Show(
+                    Me,
+                    "検索中にエラーが発生しました。" & Environment.NewLine & Environment.NewLine & ex.Message,
+                    "検索エラー",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error)
+            End If
+        Finally
+            If Not IsDisposed Then
+                SetSearchingState(False)
+                If _document IsNot Nothing Then UpdateStatus()
+            End If
+        End Try
     End Sub
 
     Private Sub ExportCurrentView()
-        If _loading Then Return
-        If _document Is Nothing OrElse _table Is Nothing OrElse _view Is Nothing Then
-            Return
-        End If
+        If _loading OrElse _searching Then Return
+        If _document Is Nothing OrElse _table Is Nothing OrElse _view Is Nothing Then Return
 
         Dim isFiltered As Boolean = Not String.IsNullOrEmpty(_view.RowFilter)
         Using optionsDialog As New ExportOptionsForm(
@@ -703,31 +836,54 @@ Public NotInheritable Class MainForm
             If optionsDialog.ShowDialog(Me) <> DialogResult.OK Then Return
 
             Using saveDialog As New SaveFileDialog()
-                saveDialog.Title = "CSVを別名保存"
-                saveDialog.Filter = "CSVファイル (*.csv)|*.csv|すべてのファイル (*.*)|*.*"
-                saveDialog.AddExtension = True
-                saveDialog.DefaultExt = "csv"
-                saveDialog.OverwritePrompt = True
-                saveDialog.InitialDirectory = Path.GetDirectoryName(_document.FilePath)
-                saveDialog.FileName =
-                    Path.GetFileNameWithoutExtension(_document.FilePath) &
-                    "_preview.csv"
-
+                ConfigureSaveDialog(saveDialog)
                 If saveDialog.ShowDialog(Me) <> DialogResult.OK Then Return
 
-                If String.Equals(
-                    Path.GetFullPath(saveDialog.FileName),
-                    Path.GetFullPath(_document.FilePath),
-                    StringComparison.OrdinalIgnoreCase) Then
+                Dim overwritesSource As Boolean = IsSamePath(saveDialog.FileName, _document.FilePath)
+                If overwritesSource Then
+                    If _document.IsLossyDecode Then
+                        MessageBox.Show(
+                            Me,
+                            "現在の表示には文字コード変換で代替文字が含まれています。" &
+                            Environment.NewLine &
+                            "元ファイルを保護するため上書きできません。文字コードを正しく指定して再読込してください。",
+                            "上書き禁止",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error)
+                        Return
+                    End If
+
+                    If Not IsSourceFileUnchanged() Then
+                        MessageBox.Show(
+                            Me,
+                            "元ファイルは読み込み後に更新または置換されています。" &
+                            Environment.NewLine &
+                            "他の変更を失わないよう、再読込するか別名で保存してください。",
+                            "外部更新を検知しました",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning)
+                        Return
+                    End If
 
                     Dim overwriteResult As DialogResult = MessageBox.Show(
                         Me,
-                        "元のCSVファイルを上書きします。続行しますか？",
+                        "元のファイルを上書きします。続行しますか？",
                         "上書き確認",
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Warning,
                         MessageBoxDefaultButton.Button2)
                     If overwriteResult <> DialogResult.Yes Then Return
+                ElseIf _document.IsLossyDecode Then
+                    Dim lossyResult As DialogResult = MessageBox.Show(
+                        Me,
+                        "現在の表示には、復号できなかったバイトを置換した代替文字が含まれています。" &
+                        Environment.NewLine &
+                        "保存先は元データと同一にはなりません。別ファイルとして保存しますか？",
+                        "代替文字を含む保存",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning,
+                        MessageBoxDefaultButton.Button2)
+                    If lossyResult <> DialogResult.Yes Then Return
                 End If
 
                 Dim exportView As DataView = _view
@@ -747,19 +903,34 @@ Public NotInheritable Class MainForm
                         optionsDialog.SelectedEncoding,
                         optionsDialog.SelectedNewLine)
 
+                    If overwritesSource Then
+                        Dim reloadOptions As New CsvLoadOptions() With {
+                            .Encoding = NormalizeReloadEncoding(optionsDialog.SelectedEncoding),
+                            .Delimiter = DelimiterToOption(_document.Delimiter),
+                            .HasHeader = _document.HasHeader
+                        }
+                        MessageBox.Show(
+                            Me,
+                            "元ファイルを保存しました。保存後の内容を再読込します。",
+                            ApplicationName,
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information)
+                        LoadCsv(saveDialog.FileName, reloadOptions)
+                        Return
+                    End If
+
                     _statusFileLabel.Text = "保存しました: " & saveDialog.FileName
                     MessageBox.Show(
                         Me,
-                        "CSVファイルを保存しました。",
+                        "ファイルを保存しました。",
                         ApplicationName,
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information)
                 Catch ex As Exception
                     MessageBox.Show(
                         Me,
-                        "CSVファイルを保存できませんでした。" &
-                        Environment.NewLine & Environment.NewLine &
-                        ex.Message,
+                        "ファイルを保存できませんでした。" &
+                        Environment.NewLine & Environment.NewLine & ex.Message,
                         "保存エラー",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error)
@@ -769,6 +940,67 @@ Public NotInheritable Class MainForm
             End Using
         End Using
     End Sub
+
+    Private Sub ConfigureSaveDialog(saveDialog As SaveFileDialog)
+        Dim extension As String = GetDefaultSaveExtension()
+        saveDialog.Title = "区切りテキストを別名保存"
+        If extension = "tsv" Then
+            saveDialog.Filter = "TSVファイル (*.tsv)|*.tsv|すべてのファイル (*.*)|*.*"
+        ElseIf extension = "csv" Then
+            saveDialog.Filter = "CSVファイル (*.csv)|*.csv|すべてのファイル (*.*)|*.*"
+        Else
+            saveDialog.Filter = "テキストファイル (*." & extension & ")|*." & extension & "|すべてのファイル (*.*)|*.*"
+        End If
+        saveDialog.AddExtension = True
+        saveDialog.DefaultExt = extension
+        saveDialog.OverwritePrompt = True
+        saveDialog.InitialDirectory = Path.GetDirectoryName(_document.FilePath)
+        saveDialog.FileName =
+            Path.GetFileNameWithoutExtension(_document.FilePath) & "_preview." & extension
+    End Sub
+
+    Private Function GetDefaultSaveExtension() As String
+        If _document.Delimiter = ControlChars.Tab Then Return "tsv"
+        If _document.Delimiter = "," Then Return "csv"
+
+        Dim sourceExtension As String = Path.GetExtension(_document.FilePath)
+        If Not String.IsNullOrWhiteSpace(sourceExtension) Then
+            Return sourceExtension.TrimStart("."c)
+        End If
+        Return "txt"
+    End Function
+
+    Private Function IsSourceFileUnchanged() As Boolean
+        Try
+            If Not File.Exists(_document.FilePath) Then Return False
+            Dim info As New FileInfo(_document.FilePath)
+            Return info.Length = _document.FileSize AndAlso
+                   info.LastWriteTimeUtc = _document.LastWriteTimeUtc
+        Catch ex As IOException
+            Return False
+        Catch ex As UnauthorizedAccessException
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function IsSamePath(left As String, right As String) As Boolean
+        Return String.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Function NormalizeReloadEncoding(value As CsvTextEncoding) As CsvTextEncoding
+        If value = CsvTextEncoding.Utf8Bom Then Return CsvTextEncoding.Utf8NoBom
+        Return value
+    End Function
+
+    Private Shared Function DelimiterToOption(delimiter As String) As CsvDelimiterOption
+        If delimiter = ControlChars.Tab Then Return CsvDelimiterOption.Tab
+        If delimiter = ";" Then Return CsvDelimiterOption.Semicolon
+        If delimiter = "|" Then Return CsvDelimiterOption.Pipe
+        Return CsvDelimiterOption.Comma
+    End Function
 
     Private Sub UpdateStatus()
         If _document Is Nothing OrElse _view Is Nothing Then Return
