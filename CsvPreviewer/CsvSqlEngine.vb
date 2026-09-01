@@ -4,6 +4,7 @@ Imports System.Data
 Imports System.Globalization
 Imports System.Text
 Imports System.Text.RegularExpressions
+Imports System.Threading
 
 Public NotInheritable Class CsvSqlException
     Inherits Exception
@@ -38,9 +39,15 @@ Public NotInheritable Class CsvSqlEngine
     Public Shared Function Execute(source As DataTable,
                                    visibleColumnCount As Integer,
                                    sql As String) As CsvSqlResult
+        Return Execute(source, visibleColumnCount, sql, CancellationToken.None)
+    End Function
+
+    Public Shared Function Execute(source As DataTable,
+                                   visibleColumnCount As Integer,
+                                   sql As String,
+                                   cancellationToken As CancellationToken) As CsvSqlResult
         If source Is Nothing Then Throw New ArgumentNullException("source")
-        If visibleColumnCount < 0 OrElse
-           visibleColumnCount > source.Columns.Count Then
+        If visibleColumnCount < 0 OrElse visibleColumnCount > source.Columns.Count Then
             Throw New ArgumentOutOfRangeException("visibleColumnCount")
         End If
         If String.IsNullOrWhiteSpace(sql) Then
@@ -50,6 +57,8 @@ Public NotInheritable Class CsvSqlEngine
             Throw New CsvSqlException("SQLで参照できるCSV列がありません。")
         End If
 
+        cancellationToken.ThrowIfCancellationRequested()
+
         Dim query As ParsedQuery = SqlParser.Parse(sql)
         Dim resolver As New ColumnResolver(source, visibleColumnCount)
         Dim selectedColumns As List(Of SelectedColumn) =
@@ -58,57 +67,62 @@ Public NotInheritable Class CsvSqlEngine
         Dim whereExpression As SqlExpression = Nothing
         If query.WhereTokens.Count > 0 Then
             whereExpression =
-                New ExpressionParser(
-                    query.WhereTokens,
-                    resolver).ParseConditionComplete()
+                New ExpressionParser(query.WhereTokens, resolver).ParseConditionComplete()
         End If
 
-        Dim rows As New List(Of RowEntry)()
-        For index As Integer = 0 To source.Rows.Count - 1
-            Dim row As DataRow = source.Rows(index)
-            If whereExpression Is Nothing OrElse
-               EvaluateCondition(whereExpression, row) Then
-                rows.Add(New RowEntry(row, index))
-            End If
-        Next
-
-        Dim matchedCount As Integer = rows.Count
         Dim aliasMap As Dictionary(Of String, SqlExpression) =
             BuildExpressionAliasMap(selectedColumns)
         Dim orderSpecifications As List(Of OrderSpecification) =
             ResolveOrderBy(query.OrderTokens, resolver, aliasMap)
-        ApplyOrdering(rows, orderSpecifications)
+        Dim maximumRows As Integer = GetMaximumRows(query)
 
         If countOnly Then
-            Dim countTable As New DataTable("SqlResult")
-            countTable.Columns.Add(selectedColumns(0).OutputName, GetType(Long))
-            If GetMaximumRows(query) > 0 Then
-                countTable.Rows.Add(CLng(matchedCount))
-            End If
-            Return New CsvSqlResult(
-                countTable,
-                matchedCount,
-                countTable.Rows.Count)
-        End If
-
-        Dim resultTable As DataTable = CreateResultTable(selectedColumns)
-        Dim maximumRows As Integer = GetMaximumRows(query)
-        Dim distinctKeys As HashSet(Of String) = Nothing
-        If query.IsDistinct Then
-            distinctKeys = New HashSet(Of String)(StringComparer.Ordinal)
-        End If
-
-        For Each rowEntry As RowEntry In rows
-            If resultTable.Rows.Count >= maximumRows Then Exit For
-
-            Dim values(selectedColumns.Count - 1) As Object
-            For index As Integer = 0 To selectedColumns.Count - 1
-                values(index) = ToSqlText(
-                    EvaluateExpression(
-                        selectedColumns(index).Expression,
-                        rowEntry.Row))
+            Dim matchedCount As Integer = 0
+            For index As Integer = 0 To source.Rows.Count - 1
+                cancellationToken.ThrowIfCancellationRequested()
+                Dim row As DataRow = source.Rows(index)
+                If whereExpression Is Nothing OrElse EvaluateCondition(whereExpression, row) Then
+                    matchedCount += 1
+                End If
             Next
 
+            Dim countTable As New DataTable("SqlResult")
+            countTable.Columns.Add(selectedColumns(0).OutputName, GetType(Long))
+            If maximumRows > 0 Then countTable.Rows.Add(CLng(matchedCount))
+            Return New CsvSqlResult(countTable, matchedCount, countTable.Rows.Count)
+        End If
+
+        If orderSpecifications.Count = 0 Then
+            Return ExecuteWithoutOrdering(
+                source,
+                selectedColumns,
+                whereExpression,
+                query.IsDistinct,
+                maximumRows,
+                cancellationToken)
+        End If
+
+        Dim rows As New List(Of RowEntry)()
+        For index As Integer = 0 To source.Rows.Count - 1
+            cancellationToken.ThrowIfCancellationRequested()
+            Dim row As DataRow = source.Rows(index)
+            If whereExpression Is Nothing OrElse EvaluateCondition(whereExpression, row) Then
+                rows.Add(New RowEntry(row, index))
+            End If
+        Next
+
+        Dim matchedRows As Integer = rows.Count
+        ApplyOrdering(rows, orderSpecifications, cancellationToken)
+
+        Dim resultTable As DataTable = CreateResultTable(selectedColumns)
+        Dim distinctKeys As HashSet(Of String) = Nothing
+        If query.IsDistinct Then distinctKeys = New HashSet(Of String)(StringComparer.Ordinal)
+
+        For Each rowEntry As RowEntry In rows
+            cancellationToken.ThrowIfCancellationRequested()
+            If resultTable.Rows.Count >= maximumRows Then Exit For
+
+            Dim values As Object() = EvaluateSelectedValues(selectedColumns, rowEntry.Row)
             If distinctKeys IsNot Nothing Then
                 Dim key As String = BuildDistinctKey(values)
                 If Not distinctKeys.Add(key) Then Continue For
@@ -116,10 +130,53 @@ Public NotInheritable Class CsvSqlEngine
             resultTable.Rows.Add(values)
         Next
 
-        Return New CsvSqlResult(
-            resultTable,
-            matchedCount,
-            resultTable.Rows.Count)
+        Return New CsvSqlResult(resultTable, matchedRows, resultTable.Rows.Count)
+    End Function
+
+    Private Shared Function ExecuteWithoutOrdering(
+        source As DataTable,
+        selectedColumns As List(Of SelectedColumn),
+        whereExpression As SqlExpression,
+        isDistinct As Boolean,
+        maximumRows As Integer,
+        cancellationToken As CancellationToken) As CsvSqlResult
+
+        Dim resultTable As DataTable = CreateResultTable(selectedColumns)
+        Dim distinctKeys As HashSet(Of String) = Nothing
+        If isDistinct Then distinctKeys = New HashSet(Of String)(StringComparer.Ordinal)
+
+        Dim matchedCount As Integer = 0
+        For index As Integer = 0 To source.Rows.Count - 1
+            cancellationToken.ThrowIfCancellationRequested()
+            Dim row As DataRow = source.Rows(index)
+            If whereExpression IsNot Nothing AndAlso Not EvaluateCondition(whereExpression, row) Then
+                Continue For
+            End If
+
+            matchedCount += 1
+            If resultTable.Rows.Count >= maximumRows Then Continue For
+
+            Dim values As Object() = EvaluateSelectedValues(selectedColumns, row)
+            If distinctKeys IsNot Nothing Then
+                Dim key As String = BuildDistinctKey(values)
+                If Not distinctKeys.Add(key) Then Continue For
+            End If
+            resultTable.Rows.Add(values)
+        Next
+
+        Return New CsvSqlResult(resultTable, matchedCount, resultTable.Rows.Count)
+    End Function
+
+    Private Shared Function EvaluateSelectedValues(
+        selectedColumns As List(Of SelectedColumn),
+        row As DataRow) As Object()
+
+        Dim values(selectedColumns.Count - 1) As Object
+        For index As Integer = 0 To selectedColumns.Count - 1
+            values(index) = ToSqlText(
+                EvaluateExpression(selectedColumns(index).Expression, row))
+        Next
+        Return values
     End Function
 
     Public Shared Function GetColumnGuide(source As DataTable,
@@ -127,9 +184,7 @@ Public NotInheritable Class CsvSqlEngine
         If source Is Nothing Then Return String.Empty
 
         Dim items As New List(Of String)()
-        For index As Integer = 0 To Math.Min(
-            visibleColumnCount,
-            source.Columns.Count) - 1
+        For index As Integer = 0 To Math.Min(visibleColumnCount, source.Columns.Count) - 1
             Dim caption As String = source.Columns(index).Caption
             If String.IsNullOrWhiteSpace(caption) OrElse
                String.Equals(
@@ -175,8 +230,7 @@ Public NotInheritable Class CsvSqlEngine
             Dim expressionTokens As List(Of SqlToken) = item
             Dim asIndex As Integer = FindTopLevelKeyword(item, "AS")
             If asIndex >= 0 Then
-                If asIndex <> item.Count - 2 OrElse
-                   Not IsIdentifierToken(item(item.Count - 1)) Then
+                If asIndex <> item.Count - 2 OrElse Not IsIdentifierToken(item(item.Count - 1)) Then
                     Throw New CsvSqlException(
                         "列別名は「列名 AS 別名」の形式で指定してください。")
                 End If
@@ -198,26 +252,17 @@ Public NotInheritable Class CsvSqlEngine
             End If
 
             Dim expression As SqlExpression =
-                New ExpressionParser(
-                    expressionTokens,
-                    resolver).ParseValueComplete()
+                New ExpressionParser(expressionTokens, resolver).ParseValueComplete()
             Dim outputName As String = aliasName
-            Dim columnExpressionValue As ColumnExpression =
-                TryCast(expression, ColumnExpression)
+            Dim columnExpressionValue As ColumnExpression = TryCast(expression, ColumnExpression)
             If String.IsNullOrEmpty(outputName) Then
                 If columnExpressionValue IsNot Nothing Then
-                    outputName = resolver.GetDefaultOutputName(
-                        columnExpressionValue.SourceIndex)
+                    outputName = resolver.GetDefaultOutputName(columnExpressionValue.SourceIndex)
                 Else
-                    outputName = "式" & (result.Count + 1).ToString(
-                        CultureInfo.InvariantCulture)
+                    outputName = "式" & (result.Count + 1).ToString(CultureInfo.InvariantCulture)
                 End If
             End If
-            result.Add(
-                New SelectedColumn(
-                    expression,
-                    outputName,
-                    False))
+            result.Add(New SelectedColumn(expression, outputName, False))
         Next
 
         Return result
@@ -228,8 +273,7 @@ Public NotInheritable Class CsvSqlEngine
         Return selectedColumns.Count = 1 AndAlso selectedColumns(0).IsCount
     End Function
 
-    Private Shared Function IsCountExpression(
-        tokens As List(Of SqlToken)) As Boolean
+    Private Shared Function IsCountExpression(tokens As List(Of SqlToken)) As Boolean
         Return tokens.Count = 4 AndAlso
                tokens(0).IsKeyword("COUNT") AndAlso
                tokens(1).Kind = TokenKind.OpenParenthesis AndAlso
@@ -237,8 +281,7 @@ Public NotInheritable Class CsvSqlEngine
                tokens(3).Kind = TokenKind.CloseParenthesis
     End Function
 
-    Private Shared Function CreateResultTable(
-        columns As List(Of SelectedColumn)) As DataTable
+    Private Shared Function CreateResultTable(columns As List(Of SelectedColumn)) As DataTable
         Dim table As New DataTable("SqlResult")
         For Each column As SelectedColumn In columns
             Dim name As String = MakeUniqueColumnName(table, column.OutputName)
@@ -260,27 +303,9 @@ Public NotInheritable Class CsvSqlEngine
         Return baseName & "_" & suffix.ToString()
     End Function
 
-    Private Shared Function BuildAliasMap(
-        columns As List(Of SelectedColumn)) As Dictionary(Of String, Integer)
-        Dim result As New Dictionary(Of String, Integer)(
-            StringComparer.OrdinalIgnoreCase)
-        For Each column As SelectedColumn In columns
-            If column.IsCount OrElse String.IsNullOrWhiteSpace(column.OutputName) Then
-                Continue For
-            End If
-            If result.ContainsKey(column.OutputName) Then
-                result(column.OutputName) = -1
-            Else
-                result.Add(column.OutputName, column.SourceIndex)
-            End If
-        Next
-        Return result
-    End Function
-
     Private Shared Function BuildExpressionAliasMap(
         columns As List(Of SelectedColumn)) As Dictionary(Of String, SqlExpression)
-        Dim result As New Dictionary(Of String, SqlExpression)(
-            StringComparer.OrdinalIgnoreCase)
+        Dim result As New Dictionary(Of String, SqlExpression)(StringComparer.OrdinalIgnoreCase)
         For Each column As SelectedColumn In columns
             If column.IsCount OrElse String.IsNullOrWhiteSpace(column.OutputName) Then
                 Continue For
@@ -308,8 +333,7 @@ Public NotInheritable Class CsvSqlEngine
             End If
 
             Dim descending As Boolean = False
-            If item(item.Count - 1).IsKeyword("ASC") OrElse
-               item(item.Count - 1).IsKeyword("DESC") Then
+            If item(item.Count - 1).IsKeyword("ASC") OrElse item(item.Count - 1).IsKeyword("DESC") Then
                 descending = item(item.Count - 1).IsKeyword("DESC")
                 item = item.GetRange(0, item.Count - 1)
             End If
@@ -326,8 +350,7 @@ Public NotInheritable Class CsvSqlEngine
                         "ORDER BYの別名「" & item(0).Value & "」は重複しています。")
                 End If
             Else
-                expression =
-                    New ExpressionParser(item, resolver).ParseValueComplete()
+                expression = New ExpressionParser(item, resolver).ParseValueComplete()
             End If
             result.Add(New OrderSpecification(expression, descending))
         Next
@@ -335,10 +358,12 @@ Public NotInheritable Class CsvSqlEngine
     End Function
 
     Private Shared Sub ApplyOrdering(rows As List(Of RowEntry),
-                                     specifications As List(Of OrderSpecification))
+                                     specifications As List(Of OrderSpecification),
+                                     cancellationToken As CancellationToken)
         If specifications.Count = 0 Then Return
 
         For Each row As RowEntry In rows
+            cancellationToken.ThrowIfCancellationRequested()
             ReDim row.OrderValues(specifications.Count - 1)
             For index As Integer = 0 To specifications.Count - 1
                 row.OrderValues(index) =
@@ -346,13 +371,17 @@ Public NotInheritable Class CsvSqlEngine
             Next
         Next
 
+        Dim comparisonCount As Integer = 0
         rows.Sort(
             Function(left As RowEntry, right As RowEntry) As Integer
+                comparisonCount += 1
+                If (comparisonCount And 1023) = 0 Then
+                    cancellationToken.ThrowIfCancellationRequested()
+                End If
+
                 For index As Integer = 0 To specifications.Count - 1
                     Dim comparison As Integer =
-                        CompareSqlValues(
-                            left.OrderValues(index),
-                            right.OrderValues(index))
+                        CompareSqlValues(left.OrderValues(index), right.OrderValues(index))
                     If specifications(index).Descending Then comparison = -comparison
                     If comparison <> 0 Then Return comparison
                 Next
@@ -403,10 +432,8 @@ Public NotInheritable Class CsvSqlEngine
         If IsSqlNull(right) Then Return 1
 
         If IsNumericSqlValue(left) AndAlso IsNumericSqlValue(right) Then
-            Dim leftNumber As Decimal =
-                Convert.ToDecimal(left, CultureInfo.InvariantCulture)
-            Dim rightNumber As Decimal =
-                Convert.ToDecimal(right, CultureInfo.InvariantCulture)
+            Dim leftNumber As Decimal = Convert.ToDecimal(left, CultureInfo.InvariantCulture)
+            Dim rightNumber As Decimal = Convert.ToDecimal(right, CultureInfo.InvariantCulture)
             Return leftNumber.CompareTo(rightNumber)
         End If
 
@@ -436,100 +463,6 @@ Public NotInheritable Class CsvSqlEngine
         End Select
     End Function
 
-    Private Shared Function RewriteWhere(tokens As List(Of SqlToken),
-                                         resolver As ColumnResolver) As String
-        Dim builder As New StringBuilder()
-        For index As Integer = 0 To tokens.Count - 1
-            Dim token As SqlToken = tokens(index)
-            If builder.Length > 0 Then builder.Append(" ")
-
-            If IsIdentifierToken(token) Then
-                If token.Kind = TokenKind.Identifier AndAlso
-                   (IsWhereKeyword(token.Value) OrElse
-                    IsFunctionName(tokens, index)) Then
-                    builder.Append(token.Text)
-                Else
-                    Dim sourceIndex As Integer = resolver.Resolve(token.Value)
-                    builder.Append("[")
-                    builder.Append(resolver.GetInternalName(sourceIndex))
-                    builder.Append("]")
-                End If
-            ElseIf token.Kind = TokenKind.Operator AndAlso token.Text = "!=" Then
-                builder.Append("<>")
-            Else
-                builder.Append(token.Text)
-            End If
-        Next
-        Return builder.ToString()
-    End Function
-
-    Private Shared Function IsWhereKeyword(value As String) As Boolean
-        Select Case value.ToUpperInvariant()
-            Case "AND", "OR", "NOT", "LIKE", "IN", "IS", "NULL",
-                 "TRUE", "FALSE", "BETWEEN"
-                Return True
-            Case Else
-                Return False
-        End Select
-    End Function
-
-    Private Shared Function IsFunctionName(tokens As List(Of SqlToken),
-                                           index As Integer) As Boolean
-        If index + 1 >= tokens.Count OrElse
-           tokens(index + 1).Kind <> TokenKind.OpenParenthesis Then
-            Return False
-        End If
-
-        Select Case tokens(index).Value.ToUpperInvariant()
-            Case "LEN", "TRIM", "SUBSTRING", "CONVERT", "ISNULL", "IIF"
-                Return True
-            Case Else
-                Return False
-        End Select
-    End Function
-
-    Private Shared Function RewriteOrderBy(
-        tokens As List(Of SqlToken),
-        resolver As ColumnResolver,
-        aliasMap As Dictionary(Of String, Integer)) As String
-
-        Dim items As List(Of List(Of SqlToken)) = SplitByComma(tokens)
-        Dim parts As New List(Of String)()
-        For Each item As List(Of SqlToken) In items
-            If item.Count < 1 OrElse item.Count > 2 OrElse
-               Not IsIdentifierToken(item(0)) Then
-                Throw New CsvSqlException(
-                    "ORDER BY句は「列名 [ASC|DESC]」の形式で指定してください。")
-            End If
-
-            Dim sourceIndex As Integer
-            If aliasMap.ContainsKey(item(0).Value) Then
-                sourceIndex = aliasMap(item(0).Value)
-                If sourceIndex < 0 Then
-                    Throw New CsvSqlException(
-                        "ORDER BYの別名「" & item(0).Value & "」は重複しています。")
-                End If
-            Else
-                sourceIndex = resolver.Resolve(item(0).Value)
-            End If
-
-            Dim direction As String = "ASC"
-            If item.Count = 2 Then
-                If item(1).IsKeyword("ASC") Then
-                    direction = "ASC"
-                ElseIf item(1).IsKeyword("DESC") Then
-                    direction = "DESC"
-                Else
-                    Throw New CsvSqlException(
-                        "ORDER BYの並び順はASCまたはDESCを指定してください。")
-                End If
-            End If
-            parts.Add(
-                "[" & resolver.GetInternalName(sourceIndex) & "] " & direction)
-        Next
-        Return String.Join(", ", parts.ToArray())
-    End Function
-
     Private Shared Function GetMaximumRows(query As ParsedQuery) As Integer
         Dim maximumRows As Integer = Integer.MaxValue
         If query.TopCount.HasValue Then maximumRows = query.TopCount.Value
@@ -542,10 +475,11 @@ Public NotInheritable Class CsvSqlEngine
     Private Shared Function BuildDistinctKey(values As Object()) As String
         Dim builder As New StringBuilder()
         For Each value As Object In values
-            Dim text As String = Convert.ToString(value, CultureInfo.InvariantCulture)
-            builder.Append(text.Length.ToString(CultureInfo.InvariantCulture))
+            Dim text As String = Convert.ToString(value, CultureInfo.CurrentCulture)
+            Dim normalized As String = CultureInfo.CurrentCulture.TextInfo.ToUpper(text)
+            builder.Append(normalized.Length.ToString(CultureInfo.InvariantCulture))
             builder.Append(":"c)
-            builder.Append(text)
+            builder.Append(normalized)
             builder.Append(";"c)
         Next
         Return builder.ToString()
@@ -560,9 +494,7 @@ Public NotInheritable Class CsvSqlEngine
         For Each token As SqlToken In tokens
             If token.Kind = TokenKind.OpenParenthesis Then depth += 1
             If token.Kind = TokenKind.CloseParenthesis Then depth -= 1
-            If depth < 0 Then
-                Throw New CsvSqlException("閉じ括弧が多すぎます。")
-            End If
+            If depth < 0 Then Throw New CsvSqlException("閉じ括弧が多すぎます。")
 
             If token.Kind = TokenKind.Comma AndAlso depth = 0 Then
                 If current.Count = 0 Then
@@ -593,8 +525,7 @@ Public NotInheritable Class CsvSqlEngine
     End Function
 
     Private Shared Function IsIdentifierToken(token As SqlToken) As Boolean
-        Return token.Kind = TokenKind.Identifier OrElse
-               token.Kind = TokenKind.BracketIdentifier
+        Return token.Kind = TokenKind.Identifier OrElse token.Kind = TokenKind.BracketIdentifier
     End Function
 
     Private NotInheritable Class RowEntry
@@ -747,9 +678,7 @@ Public NotInheritable Class CsvSqlEngine
             Dim value As String = ToSqlText(ValueExpression.Evaluate(row))
             Dim pattern As String = ToSqlText(PatternExpression.Evaluate(row))
             Dim regexPattern As String =
-                "^" & Regex.Escape(pattern).
-                    Replace("%", ".*").
-                    Replace("_", ".") & "$"
+                "^" & Regex.Escape(pattern).Replace("%", ".*").Replace("_", ".") & "$"
             Dim matched As Boolean =
                 Regex.IsMatch(
                     value,
@@ -853,8 +782,7 @@ Public NotInheritable Class CsvSqlEngine
                     End If
                     Return Arguments(2).Evaluate(row)
                 Case Else
-                    Throw New CsvSqlException(
-                        "関数「" & Name & "」は使用できません。")
+                    Throw New CsvSqlException("関数「" & Name & "」は使用できません。")
             End Select
         End Function
 
@@ -881,8 +809,7 @@ Public NotInheritable Class CsvSqlEngine
                     minimum = 2
                     maximum = 2
                 Case Else
-                    Throw New CsvSqlException(
-                        "関数「" & Name & "」は使用できません。")
+                    Throw New CsvSqlException("関数「" & Name & "」は使用できません。")
             End Select
 
             If Arguments.Count < minimum OrElse Arguments.Count > maximum Then
@@ -914,9 +841,7 @@ Public NotInheritable Class CsvSqlEngine
             If value.Length >= width Then Return value.Substring(0, width)
 
             Dim padding As String = " "
-            If Arguments.Count = 3 Then
-                padding = ToSqlText(Arguments(2).Evaluate(row))
-            End If
+            If Arguments.Count = 3 Then padding = ToSqlText(Arguments(2).Evaluate(row))
             If padding.Length = 0 Then
                 Throw New CsvSqlException("LPAD/RPADの埋め文字は空にできません。")
             End If
@@ -993,17 +918,12 @@ Public NotInheritable Class CsvSqlEngine
 
             Dim text As String = ToSqlText(value).Trim()
             Dim format As String = String.Empty
-            If Arguments.Count = 2 Then
-                format = ToSqlText(Arguments(1).Evaluate(row)).Trim()
-            End If
+            If Arguments.Count = 2 Then format = ToSqlText(Arguments(1).Evaluate(row)).Trim()
 
             Dim numericValue As Decimal
-            If TryParseNumber(text, format, numericValue) Then
-                Return numericValue
-            End If
+            If TryParseNumber(text, format, numericValue) Then Return numericValue
 
-            Throw New CsvSqlException(
-                "TO_NUMBERで数値に変換できません: " & text)
+            Throw New CsvSqlException("TO_NUMBERで数値に変換できません: " & text)
         End Function
 
         Private Shared Function TryParseNumber(text As String,
@@ -1025,8 +945,7 @@ Public NotInheritable Class CsvSqlEngine
             If String.IsNullOrWhiteSpace(format) Then Return False
 
             Dim upperFormat As String = format.ToUpperInvariant()
-            If upperFormat.IndexOf("D"c) < 0 AndAlso
-               upperFormat.IndexOf("G"c) < 0 Then
+            If upperFormat.IndexOf("D"c) < 0 AndAlso upperFormat.IndexOf("G"c) < 0 Then
                 Return False
             End If
 
@@ -1042,8 +961,7 @@ Public NotInheritable Class CsvSqlEngine
             For index As Integer = 0 To normalized.Length - 1
                 Dim character As Char = normalized(index)
                 If Char.IsDigit(character) OrElse
-                   ((character = "+"c OrElse character = "-"c) AndAlso
-                    builder.Length = 0) Then
+                   ((character = "+"c OrElse character = "-"c) AndAlso builder.Length = 0) Then
                     builder.Append(character)
                 ElseIf index = decimalPosition Then
                     builder.Append("."c)
@@ -1126,8 +1044,7 @@ Public NotInheritable Class CsvSqlEngine
         Public ReadOnly Property Expression As SqlExpression
         Public ReadOnly Property SourceIndex As Integer
             Get
-                Dim columnExpressionValue As ColumnExpression =
-                    TryCast(Expression, ColumnExpression)
+                Dim columnExpressionValue As ColumnExpression = TryCast(Expression, ColumnExpression)
                 If columnExpressionValue Is Nothing Then Return -1
                 Return columnExpressionValue.SourceIndex
             End Get
@@ -1144,11 +1061,9 @@ Public NotInheritable Class CsvSqlEngine
         Public Sub New(source As DataTable, columnCount As Integer)
             _source = source
             _columnCount = columnCount
-            _names = New Dictionary(Of String, Integer)(
-                StringComparer.OrdinalIgnoreCase)
+            _names = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
 
             For index As Integer = 0 To columnCount - 1
-                AddName("C" & (index + 1).ToString(CultureInfo.InvariantCulture), index)
                 AddName(source.Columns(index).ColumnName, index)
                 If Not String.IsNullOrWhiteSpace(source.Columns(index).Caption) Then
                     AddName(source.Columns(index).Caption, index)
@@ -1177,6 +1092,9 @@ Public NotInheritable Class CsvSqlEngine
                 normalized = normalized.Substring(dotIndex + 1)
             End If
 
+            Dim ordinalIndex As Integer
+            If TryResolveOrdinalName(normalized, ordinalIndex) Then Return ordinalIndex
+
             If Not _names.ContainsKey(normalized) Then
                 Throw New CsvSqlException(
                     "列「" & normalized & "」が見つかりません。" &
@@ -1200,6 +1118,25 @@ Public NotInheritable Class CsvSqlEngine
                 Return "C" & (index + 1).ToString(CultureInfo.InvariantCulture)
             End If
             Return caption
+        End Function
+
+        Private Function TryResolveOrdinalName(name As String,
+                                               ByRef index As Integer) As Boolean
+            index = -1
+            If String.IsNullOrEmpty(name) OrElse name.Length < 2 Then Return False
+            If Char.ToUpperInvariant(name(0)) <> "C"c Then Return False
+
+            Dim number As Integer
+            If Not Integer.TryParse(
+                name.Substring(1),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                number) Then
+                Return False
+            End If
+            If number < 1 OrElse number > _columnCount Then Return False
+            index = number - 1
+            Return True
         End Function
 
         Private Sub AddName(name As String, index As Integer)
@@ -1250,9 +1187,7 @@ Public NotInheritable Class CsvSqlEngine
         End Function
 
         Private Function ParseNotExpression() As SqlExpression
-            If MatchKeyword("NOT") Then
-                Return New NotExpression(ParseNotExpression())
-            End If
+            If MatchKeyword("NOT") Then Return New NotExpression(ParseNotExpression())
             Return ParsePredicate()
         End Function
 
@@ -1286,10 +1221,7 @@ Public NotInheritable Class CsvSqlEngine
             If HasMore AndAlso Current.Kind = TokenKind.Operator Then
                 Dim comparisonOperator As String = Current.Text
                 _index += 1
-                Return New ComparisonExpression(
-                    left,
-                    ParseValue(),
-                    comparisonOperator)
+                Return New ComparisonExpression(left, ParseValue(), comparisonOperator)
             End If
             Return left
         End Function
@@ -1311,9 +1243,7 @@ Public NotInheritable Class CsvSqlEngine
         End Function
 
         Private Function ParseValue() As SqlExpression
-            If Not HasMore Then
-                Throw New CsvSqlException("SQL式が途中で終了しています。")
-            End If
+            If Not HasMore Then Throw New CsvSqlException("SQL式が途中で終了しています。")
 
             If Current.IsKeyword("CASE") Then Return ParseCaseExpression()
 
@@ -1355,8 +1285,7 @@ Public NotInheritable Class CsvSqlEngine
                 Dim token As SqlToken = Current
                 _index += 1
                 If token.Kind = TokenKind.Identifier AndAlso
-                   HasMore AndAlso
-                   Current.Kind = TokenKind.OpenParenthesis Then
+                   HasMore AndAlso Current.Kind = TokenKind.OpenParenthesis Then
                     Return ParseFunction(token.Value)
                 End If
                 Return New ColumnExpression(_resolver.Resolve(token.Value))
@@ -1368,8 +1297,7 @@ Public NotInheritable Class CsvSqlEngine
                 Return nested
             End If
 
-            Throw New CsvSqlException(
-                "SQL式として解釈できません: " & Current.Text)
+            Throw New CsvSqlException("SQL式として解釈できません: " & Current.Text)
         End Function
 
         Private Function ParseFunction(name As String) As SqlExpression
@@ -1439,9 +1367,7 @@ Public NotInheritable Class CsvSqlEngine
         End Function
 
         Private Sub Expect(kind As TokenKind, displayText As String)
-            If Not Match(kind) Then
-                Throw New CsvSqlException(displayText & "が必要です。")
-            End If
+            If Not Match(kind) Then Throw New CsvSqlException(displayText & "が必要です。")
         End Sub
 
         Private Function Match(kind As TokenKind) As Boolean
@@ -1706,9 +1632,7 @@ Public NotInheritable Class CsvSqlEngine
                             index += 1
                         End If
                     End While
-                    If Not closed Then
-                        Throw New CsvSqlException("列名の ] がありません。")
-                    End If
+                    If Not closed Then Throw New CsvSqlException("列名の ] がありません。")
                     tokens.Add(
                         New SqlToken(
                             TokenKind.BracketIdentifier,
@@ -1720,9 +1644,9 @@ Public NotInheritable Class CsvSqlEngine
                 If Char.IsLetter(character) OrElse character = "_"c Then
                     Dim start As Integer = index
                     index += 1
-                    While index < sql.Length AndAlso _
-                          (Char.IsLetterOrDigit(sql(index)) OrElse _
-                           sql(index) = "_"c OrElse _
+                    While index < sql.Length AndAlso
+                          (Char.IsLetterOrDigit(sql(index)) OrElse
+                           sql(index) = "_"c OrElse
                            AscW(sql(index)) = &H2E)
                         index += 1
                     End While
@@ -1735,8 +1659,7 @@ Public NotInheritable Class CsvSqlEngine
                     Char.IsDigit(character) OrElse
                     ((character = "+"c OrElse character = "-"c) AndAlso
                      index + 1 < sql.Length AndAlso
-                     (Char.IsDigit(sql(index + 1)) OrElse
-                      sql(index + 1) = "."c)) OrElse
+                     (Char.IsDigit(sql(index + 1)) OrElse sql(index + 1) = "."c)) OrElse
                     (character = "."c AndAlso
                      index + 1 < sql.Length AndAlso
                      Char.IsDigit(sql(index + 1)))
