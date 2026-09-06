@@ -46,6 +46,8 @@
   <ItemGroup>
     <Compile Include="Program.vb" />
     <Compile Include="RegressionProgram.vb" />
+    <Compile Include="LargeCsvTests.vb" />
+    <Compile Include="CsvLoadBenchmark.vb" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\CsvPreviewer\CsvPreviewer.vbproj">

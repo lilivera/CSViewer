@@ -15,11 +15,13 @@ Public NotInheritable Class CsvTableBuilder
     Private Sub New()
     End Sub
 
-    Public Shared Function Build(document As CsvDocument) As DataTable
+    Public Shared Function Build(document As CsvDocument,
+                                  Optional releaseRecordStorage As Boolean = False) As DataTable
         If document Is Nothing Then Throw New ArgumentNullException("document")
 
         Dim table As New DataTable("CsvData")
         table.CaseSensitive = False
+        table.MinimumCapacity = document.DataRowCount
 
         If document.HasHeader AndAlso document.Records.Count > 0 Then
             Dim header As CsvRecord = document.Records(0)
@@ -52,27 +54,34 @@ Public NotInheritable Class CsvTableBuilder
         AddInternalColumn(table, HasIssueColumn, GetType(Boolean))
         AddInternalColumn(table, SearchMatchColumn, GetType(Boolean))
 
-        For index As Integer = document.DataStartIndex To document.Records.Count - 1
-            Dim record As CsvRecord = document.Records(index)
-            Dim row As DataRow = table.NewRow()
+        table.BeginLoadData()
+        Try
+            For index As Integer = document.DataStartIndex To document.Records.Count - 1
+                Dim record As CsvRecord = document.Records(index)
+                Dim row As DataRow = table.NewRow()
 
-            For columnIndex As Integer = 0 To columnCount - 1
-                If columnIndex < record.Fields.Length Then
-                    row(columnIndex) = If(record.Fields(columnIndex), String.Empty)
-                Else
-                    row(columnIndex) = String.Empty
-                End If
+                For columnIndex As Integer = 0 To columnCount - 1
+                    If columnIndex < record.Fields.Length Then
+                        row(columnIndex) = If(record.Fields(columnIndex), String.Empty)
+                    Else
+                        row(columnIndex) = String.Empty
+                    End If
+                Next
+
+                row(RecordNumberColumn) = record.RecordNumber
+                row(PhysicalLineColumn) = record.StartLineNumber
+                row(OriginalFieldCountColumn) = record.Fields.Length
+                row(OriginalRecordTextColumn) = If(record.OriginalText, String.Empty)
+                row(IsMalformedColumn) = record.IsMalformed
+                row(HasIssueColumn) = record.HasIssue
+                row(SearchMatchColumn) = True
+                table.Rows.Add(row)
+                If releaseRecordStorage Then document.Records(index) = Nothing
             Next
-
-            row(RecordNumberColumn) = record.RecordNumber
-            row(PhysicalLineColumn) = record.StartLineNumber
-            row(OriginalFieldCountColumn) = record.Fields.Length
-            row(OriginalRecordTextColumn) = If(record.OriginalText, String.Empty)
-            row(IsMalformedColumn) = record.IsMalformed
-            row(HasIssueColumn) = record.HasIssue
-            row(SearchMatchColumn) = True
-            table.Rows.Add(row)
-        Next
+        Finally
+            table.EndLoadData()
+        End Try
+        If releaseRecordStorage Then document.ReleaseRecordStorage()
 
         Return table
     End Function
