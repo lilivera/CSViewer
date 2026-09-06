@@ -24,3 +24,25 @@ jobs:
       - name: Smoke tests
         shell: cmd
         run: CsvPreviewer.SmokeTests\bin\Release\CsvPreviewer.SmokeTests.exe
+
+      - name: Benchmark CSV loading
+        if: github.event_name == 'pull_request'
+        shell: cmd
+        run: CsvPreviewer.SmokeTests\bin\Release\CsvPreviewer.SmokeTests.exe --benchmark
+
+      - name: Checkout benchmark baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: benchmark-base
+
+      - name: Benchmark baseline with the same harness
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          msbuild benchmark-base/CsvPreviewer/CsvPreviewer.vbproj /t:Rebuild /p:Configuration=Release /m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item CsvPreviewer.SmokeTests/bin/Release/CsvPreviewer.SmokeTests.exe benchmark-base/CsvPreviewer/bin/Release/
+          & benchmark-base/CsvPreviewer/bin/Release/CsvPreviewer.SmokeTests.exe --benchmark
+          exit $LASTEXITCODE

@@ -363,9 +363,8 @@ Public NotInheritable Class MainForm
 
     Private Sub GridCellFormatting(sender As Object,
                                    e As DataGridViewCellFormattingEventArgs)
-        If e.RowIndex < 0 OrElse e.RowIndex >= _grid.Rows.Count Then Return
-        Dim rowView As DataRowView =
-            TryCast(_grid.Rows(e.RowIndex).DataBoundItem, DataRowView)
+        If _view Is Nothing OrElse e.RowIndex < 0 OrElse e.RowIndex >= _view.Count Then Return
+        Dim rowView As DataRowView = _view(e.RowIndex)
         If rowView Is Nothing Then Return
         If Convert.ToBoolean(rowView(CsvTableBuilder.HasIssueColumn)) Then
             e.CellStyle.BackColor = Color.MistyRose
@@ -374,11 +373,10 @@ Public NotInheritable Class MainForm
 
     Private Sub GridRowPostPaint(sender As Object,
                                  e As DataGridViewRowPostPaintEventArgs)
-        If e.RowIndex < 0 OrElse e.RowIndex >= _grid.Rows.Count Then Return
+        If _view Is Nothing OrElse e.RowIndex < 0 OrElse e.RowIndex >= _view.Count Then Return
 
         Dim textValue As String = (e.RowIndex + 1).ToString()
-        Dim rowView As DataRowView =
-            TryCast(_grid.Rows(e.RowIndex).DataBoundItem, DataRowView)
+        Dim rowView As DataRowView = _view(e.RowIndex)
         If rowView IsNot Nothing Then
             textValue = Convert.ToString(rowView(CsvTableBuilder.PhysicalLineColumn))
         End If
@@ -433,13 +431,15 @@ Public NotInheritable Class MainForm
     End Sub
 
     Private Function TrySelectRecord(recordNumber As Integer) As Boolean
-        For Each gridRow As DataGridViewRow In _grid.Rows
-            Dim rowView As DataRowView = TryCast(gridRow.DataBoundItem, DataRowView)
+        If _view Is Nothing Then Return False
+        For rowIndex As Integer = 0 To _view.Count - 1
+            Dim rowView As DataRowView = _view(rowIndex)
             If rowView Is Nothing Then Continue For
             If Convert.ToInt32(rowView(CsvTableBuilder.RecordNumberColumn)) <> recordNumber Then
                 Continue For
             End If
 
+            Dim gridRow As DataGridViewRow = _grid.Rows(rowIndex)
             _grid.ClearSelection()
             If gridRow.Cells.Count > 0 Then
                 gridRow.Cells(0).Selected = True
@@ -573,8 +573,7 @@ Public NotInheritable Class MainForm
                 Await Task.Run(
                     Function() As LoadedCsv
                         Dim document As CsvDocument = CsvParser.Load(filePath, options)
-                        Dim table As DataTable = CsvTableBuilder.Build(document)
-                        document.ReleaseRecordStorage()
+                        Dim table As DataTable = CsvTableBuilder.Build(document, releaseRecordStorage:=True)
                         Return New LoadedCsv(document, table)
                     End Function)
 

@@ -8,41 +8,77 @@ Public NotInheritable Class CsvTextCodec
 
     Public Shared Function DecodeFile(filePath As String,
                                       requestedEncoding As CsvTextEncoding) As DecodedCsvText
+        Dim result As DecodedCsvText = Nothing
+        Using reader As CsvFileReader = OpenFileReader(filePath, requestedEncoding, result)
+            result.Text = reader.ReadToEnd()
+        End Using
+        Return result
+    End Function
+
+    ' Validate with a fixed buffer so automatic encoding selection still checks the
+    ' entire file (including invalid bytes beyond the detection prefix).
+    Public Shared Function OpenFileReader(filePath As String,
+                                           requestedEncoding As CsvTextEncoding,
+                                           ByRef result As DecodedCsvText) As CsvFileReader
         Dim prefix As Byte() = ReadFilePrefix(filePath, 65536)
         Dim bomEncoding As CsvTextEncoding = DetectBom(prefix)
+        Dim kind As CsvTextEncoding = requestedEncoding
+        Dim warning As String = Nothing
+        Dim validatedUtf8 As Boolean = False
 
-        If requestedEncoding <> CsvTextEncoding.AutoDetect Then
-            Return DecodeFileUsing(
-                filePath,
-                requestedEncoding,
-                IsMatchingBom(bomEncoding, requestedEncoding))
-        End If
-
-        If bomEncoding <> CsvTextEncoding.AutoDetect Then
-            Return DecodeFileUsing(filePath, bomEncoding, True)
-        End If
-
-        Dim utf16Encoding As CsvTextEncoding = DetectBomlessUtf16(prefix)
-        If utf16Encoding <> CsvTextEncoding.AutoDetect Then
-            Return DecodeFileUsing(filePath, utf16Encoding, False)
-        End If
-
-        Try
-            Dim result As DecodedCsvText =
-                DecodeFileUsingStrict(
-                    filePath,
-                    CsvTextEncoding.Utf8NoBom,
-                    False)
-
-            Dim shiftJisSample As String = Nothing
-            If ContainsNonAscii(prefix) AndAlso
-               TryDecodeBytes(prefix, CsvTextEncoding.ShiftJis, shiftJisSample) Then
-                result.DetectionWarning =
-                    "UTF-8とShift_JISの両方として解釈可能なため、UTF-8として表示しています。必要に応じて文字コードを明示してください。"
+        If kind = CsvTextEncoding.AutoDetect Then
+            kind = bomEncoding
+            If kind = CsvTextEncoding.AutoDetect Then kind = DetectBomlessUtf16(prefix)
+            If kind = CsvTextEncoding.AutoDetect Then
+                validatedUtf8 = CanDecodeFile(filePath, CsvTextEncoding.Utf8NoBom, False)
+                kind = If(validatedUtf8, CsvTextEncoding.Utf8NoBom, CsvTextEncoding.ShiftJis)
+                Dim shiftJisSample As String = Nothing
+                If validatedUtf8 AndAlso ContainsNonAscii(prefix) AndAlso
+                   TryDecodeBytes(prefix, CsvTextEncoding.ShiftJis, shiftJisSample) Then
+                    warning =
+                        "UTF-8とShift_JISの両方として解釈可能なため、UTF-8として表示しています。必要に応じて文字コードを明示してください。"
+                End If
             End If
-            Return result
+        End If
+
+        Dim hasBom As Boolean = IsMatchingBom(bomEncoding, kind)
+        Dim lossy As Boolean = Not validatedUtf8 AndAlso Not CanDecodeFile(filePath, kind, hasBom)
+        result = New DecodedCsvText() With {
+            .EncodingKind = NormalizeEncodingKind(kind, hasBom),
+            .EncodingDisplayName = GetEncodingDisplayName(kind, hasBom),
+            .HasBom = hasBom,
+            .UsedReplacementCharacter = lossy,
+            .DetectionWarning = warning
+        }
+        Return CreateFileReader(filePath, kind, hasBom, Not lossy)
+    End Function
+
+    Private Shared Function CanDecodeFile(filePath As String,
+                                           kind As CsvTextEncoding,
+                                           hasBom As Boolean) As Boolean
+        Try
+            Using reader As CsvFileReader = CreateFileReader(filePath, kind, hasBom, True)
+                Dim buffer(65535) As Char
+                While reader.Read(buffer, 0, buffer.Length) > 0
+                End While
+            End Using
+            Return True
         Catch ex As DecoderFallbackException
-            Return DecodeFileUsing(filePath, CsvTextEncoding.ShiftJis, False)
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function CreateFileReader(filePath As String,
+                                              kind As CsvTextEncoding,
+                                              hasBom As Boolean,
+                                              strict As Boolean) As CsvFileReader
+        Dim stream As New FileStream(filePath, FileMode.Open, FileAccess.Read,
+                                     FileShare.Read, 65536, FileOptions.SequentialScan)
+        Try
+            Return New CsvFileReader(stream, GetEncodingForDecode(kind, strict), GetBomLength(kind, hasBom))
+        Catch
+            stream.Dispose()
+            Throw
         End Try
     End Function
 
@@ -182,62 +218,6 @@ Public NotInheritable Class CsvTextCodec
             Dim shortened(offset - 1) As Byte
             Buffer.BlockCopy(bytes, 0, shortened, 0, offset)
             Return shortened
-        End Using
-    End Function
-
-    Private Shared Function DecodeFileUsing(filePath As String,
-                                            kind As CsvTextEncoding,
-                                            hasMatchingBom As Boolean) As DecodedCsvText
-        Try
-            Return DecodeFileUsingStrict(filePath, kind, hasMatchingBom)
-        Catch ex As DecoderFallbackException
-            Dim bomLength As Integer = GetBomLength(kind, hasMatchingBom)
-            Return New DecodedCsvText() With {
-                .Text = ReadFileText(
-                    filePath,
-                    GetEncodingForDecode(kind, False),
-                    bomLength),
-                .EncodingKind = NormalizeEncodingKind(kind, hasMatchingBom),
-                .EncodingDisplayName = GetEncodingDisplayName(kind, hasMatchingBom),
-                .HasBom = hasMatchingBom,
-                .UsedReplacementCharacter = True
-            }
-        End Try
-    End Function
-
-    Private Shared Function DecodeFileUsingStrict(filePath As String,
-                                                  kind As CsvTextEncoding,
-                                                  hasMatchingBom As Boolean) As DecodedCsvText
-        Dim bomLength As Integer = GetBomLength(kind, hasMatchingBom)
-        Return New DecodedCsvText() With {
-            .Text = ReadFileText(
-                filePath,
-                GetEncodingForDecode(kind, True),
-                bomLength),
-            .EncodingKind = NormalizeEncodingKind(kind, hasMatchingBom),
-            .EncodingDisplayName = GetEncodingDisplayName(kind, hasMatchingBom),
-            .HasBom = hasMatchingBom,
-            .UsedReplacementCharacter = False
-        }
-    End Function
-
-    Private Shared Function ReadFileText(filePath As String,
-                                         encoding As Encoding,
-                                         bomLength As Integer) As String
-        Using stream As New FileStream(
-            filePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite)
-            stream.Position = Math.Min(CLng(bomLength), stream.Length)
-            Using reader As New StreamReader(
-                stream,
-                encoding,
-                False,
-                65536,
-                False)
-                Return reader.ReadToEnd()
-            End Using
         End Using
     End Function
 

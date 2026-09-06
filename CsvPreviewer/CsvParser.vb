@@ -16,15 +16,21 @@ Public NotInheritable Class CsvParser
             Throw New ArgumentNullException("options")
         End If
 
-        Dim decoded As DecodedCsvText = CsvTextCodec.DecodeFile(filePath, options.Encoding)
-        Dim delimiter As String
-        If options.Delimiter = CsvDelimiterOption.AutoDetect Then
-            delimiter = DetectDelimiter(decoded.Text)
-        Else
-            delimiter = CsvDelimiterResolver.Resolve(options.Delimiter)
-        End If
-
-        Dim document As CsvDocument = ParseText(decoded.Text, delimiter, options.HasHeader)
+        Dim decoded As DecodedCsvText = Nothing
+        Dim document As CsvDocument
+        Using reader As CsvFileReader = CsvTextCodec.OpenFileReader(filePath, options.Encoding, decoded)
+            Dim delimiter As String
+            If options.Delimiter = CsvDelimiterOption.AutoDetect Then
+                ' Bound delimiter sniffing even when a candidate has an unclosed quote.
+                Dim sample(65535) As Char
+                Dim count As Integer = reader.ReadBlock(sample, 0, sample.Length)
+                delimiter = DetectDelimiter(New String(sample, 0, count))
+                reader.Restart()
+            Else
+                delimiter = CsvDelimiterResolver.Resolve(options.Delimiter)
+            End If
+            document = ParseReader(reader, delimiter, options.HasHeader)
+        End Using
         Dim fileInfo As New FileInfo(filePath)
         document.FilePath = fileInfo.FullName
         document.FileSize = fileInfo.Length
@@ -34,7 +40,6 @@ Public NotInheritable Class CsvParser
         document.EncodingDisplayName = decoded.EncodingDisplayName
         document.HasBom = decoded.HasBom
         document.IsLossyDecode = decoded.UsedReplacementCharacter
-        document.LineEnding = DetectRecordLineEndings(decoded.Text, delimiter)
 
         If decoded.UsedReplacementCharacter Then
             document.Issues.Insert(
@@ -71,13 +76,20 @@ Public NotInheritable Class CsvParser
             Throw New ArgumentException("区切り文字が指定されていません。", "delimiter")
         End If
 
+        Using reader As New StringReader(text)
+            Return ParseReader(reader, delimiter, hasHeader)
+        End Using
+    End Function
+
+    Private Shared Function ParseReader(reader As TextReader,
+                                         delimiter As String,
+                                         hasHeader As Boolean) As CsvDocument
         Dim document As New CsvDocument() With {
             .Delimiter = delimiter,
-            .HasHeader = hasHeader,
-            .LineEnding = DetectRecordLineEndings(text, delimiter)
+            .HasHeader = hasHeader
         }
 
-        ParseRecords(text, delimiter, Integer.MaxValue, document)
+        ParseRecords(reader, delimiter, Integer.MaxValue, document)
 
         AnalyzeColumnCounts(document)
         AnalyzeHeader(document)
@@ -271,7 +283,9 @@ Public NotInheritable Class CsvParser
         Dim counts As New List(Of Integer)()
 
         Dim parsed As New CsvDocument()
-        ParseRecords(text, delimiter, maximumRecords, parsed)
+        Using reader As New StringReader(text)
+            ParseRecords(reader, delimiter, maximumRecords, parsed)
+        End Using
         For Each record As CsvRecord In parsed.Records
             counts.Add(If(record.IsMalformed, 0, record.Fields.Length))
         Next
@@ -279,14 +293,16 @@ Public NotInheritable Class CsvParser
         Return counts
     End Function
 
-    Private Shared Sub ParseRecords(text As String,
+    Private Shared Sub ParseRecords(reader As TextReader,
                                     delimiter As String,
                                     maximumRecords As Integer,
                                     document As CsvDocument)
         Dim fields As New List(Of String)()
         Dim field As New StringBuilder()
-        Dim index As Integer = 0
-        Dim recordStartIndex As Integer = 0
+        Dim input As New CsvCharacterReader(reader, delimiter.Length)
+        Dim crLfCount As Integer = 0
+        Dim lfCount As Integer = 0
+        Dim crCount As Integer = 0
         Dim recordStartLine As Long = 1
         Dim currentLine As Long = 1
         Dim recordNumber As Integer = 1
@@ -296,28 +312,27 @@ Public NotInheritable Class CsvParser
         Dim malformed As Boolean = False
         Dim malformedLine As Long = 0
 
-        While index < text.Length AndAlso document.Records.Count < maximumRecords
-            Dim newLineLength As Integer = GetNewLineLength(text, index)
+        While document.Records.Count < maximumRecords AndAlso input.Peek() >= 0
+            Dim newLineLength As Integer = input.NewLineLength()
 
             If inQuotes Then
-                If text(index) = ControlChars.Quote Then
-                    If index + 1 < text.Length AndAlso
-                       text(index + 1) = ControlChars.Quote Then
+                If ChrW(input.Peek()) = ControlChars.Quote Then
+                    If input.Peek(1) = 34 Then
                         field.Append(ControlChars.Quote)
-                        index += 2
+                        input.Advance(2)
                     Else
                         inQuotes = False
                         afterClosingQuote = True
-                        index += 1
+                        input.Advance(1)
                     End If
                 Else
                     If newLineLength > 0 Then
-                        field.Append(text, index, newLineLength)
+                        field.Append(If(newLineLength = 2, ControlChars.CrLf, ChrW(input.Peek()).ToString()))
                         currentLine += 1
-                        index += newLineLength
+                        input.Advance(newLineLength)
                     Else
-                        field.Append(text(index))
-                        index += 1
+                        field.Append(ChrW(input.Peek()))
+                        input.Advance(1)
                     End If
                 End If
                 Continue While
@@ -331,32 +346,33 @@ Public NotInheritable Class CsvParser
                         recordNumber,
                         recordStartLine,
                         fields,
-                        text.Substring(recordStartIndex, index - recordStartIndex),
+                        input.OriginalText(),
                         True,
                         malformedLine)
                     recordNumber += 1
-                    index += newLineLength
+                    CountRecordLineEnding(input, newLineLength, crLfCount, lfCount, crCount)
+                    input.Advance(newLineLength)
                     currentLine += 1
-                    recordStartIndex = index
+                    input.StartRecord()
                     recordStartLine = currentLine
-                    fields = New List(Of String)()
-                    field = New StringBuilder()
+                    fields.Clear()
+                    ResetField(field)
                     atFieldStart = True
                     malformed = False
                     malformedLine = 0
                 Else
-                    index += 1
+                    input.Advance(1)
                 End If
                 Continue While
             End If
 
             If afterClosingQuote Then
-                If IsDelimiterAt(text, index, delimiter) Then
+                If input.IsDelimiter(delimiter) Then
                     fields.Add(field.ToString())
-                    field = New StringBuilder()
+                    ResetField(field)
                     atFieldStart = True
                     afterClosingQuote = False
-                    index += delimiter.Length
+                    input.Advance(delimiter.Length)
                 ElseIf newLineLength > 0 Then
                     fields.Add(field.ToString())
                     AddParsedRecord(
@@ -368,21 +384,22 @@ Public NotInheritable Class CsvParser
                         False,
                         0)
                     recordNumber += 1
-                    index += newLineLength
+                    CountRecordLineEnding(input, newLineLength, crLfCount, lfCount, crCount)
+                    input.Advance(newLineLength)
                     currentLine += 1
-                    recordStartIndex = index
+                    input.StartRecord()
                     recordStartLine = currentLine
-                    fields = New List(Of String)()
-                    field = New StringBuilder()
+                    fields.Clear()
+                    ResetField(field)
                     atFieldStart = True
                     afterClosingQuote = False
-                ElseIf text(index) = " "c OrElse text(index) = ControlChars.Tab Then
-                    index += 1
+                ElseIf ChrW(input.Peek()) = " "c OrElse ChrW(input.Peek()) = ControlChars.Tab Then
+                    input.Advance(1)
                 Else
                     malformed = True
                     malformedLine = currentLine
                     afterClosingQuote = False
-                    index += 1
+                    input.Advance(1)
                 End If
                 Continue While
             End If
@@ -398,44 +415,46 @@ Public NotInheritable Class CsvParser
                     False,
                     0)
                 recordNumber += 1
-                index += newLineLength
+                CountRecordLineEnding(input, newLineLength, crLfCount, lfCount, crCount)
+                input.Advance(newLineLength)
                 currentLine += 1
-                recordStartIndex = index
+                input.StartRecord()
                 recordStartLine = currentLine
-                fields = New List(Of String)()
-                field = New StringBuilder()
+                fields.Clear()
+                ResetField(field)
                 atFieldStart = True
                 Continue While
             End If
 
-            If IsDelimiterAt(text, index, delimiter) Then
+            If input.IsDelimiter(delimiter) Then
                 fields.Add(field.ToString())
-                field = New StringBuilder()
+                ResetField(field)
                 atFieldStart = True
-                index += delimiter.Length
+                input.Advance(delimiter.Length)
                 Continue While
             End If
 
-            If text(index) = ControlChars.Quote Then
+            If ChrW(input.Peek()) = ControlChars.Quote Then
                 If atFieldStart Then
                     inQuotes = True
                     atFieldStart = False
-                    index += 1
+                    input.Advance(1)
                 Else
                     malformed = True
                     malformedLine = currentLine
-                    index += 1
+                    input.Advance(1)
                 End If
                 Continue While
             End If
 
-            field.Append(text(index))
+            field.Append(ChrW(input.Peek()))
             atFieldStart = False
-            index += 1
+            input.Advance(1)
         End While
 
+        document.LineEnding = CreateLineEndingInfo(crLfCount, lfCount, crCount)
         If document.Records.Count >= maximumRecords Then Return
-        If recordStartIndex >= text.Length Then Return
+        If Not input.HasRecordText Then Return
 
         If inQuotes Then
             malformed = True
@@ -444,7 +463,7 @@ Public NotInheritable Class CsvParser
 
         fields.Add(field.ToString())
         Dim originalText As String = Nothing
-        If malformed Then originalText = text.Substring(recordStartIndex)
+        If malformed Then originalText = input.OriginalText()
         AddParsedRecord(
             document,
             recordNumber,
@@ -453,6 +472,28 @@ Public NotInheritable Class CsvParser
             originalText,
             malformed,
             malformedLine)
+    End Sub
+
+    Private Shared Sub ResetField(ByRef field As StringBuilder)
+        If field.Capacity > 65536 Then
+            field = New StringBuilder()
+        Else
+            field.Clear()
+        End If
+    End Sub
+
+    Private Shared Sub CountRecordLineEnding(input As CsvCharacterReader,
+                                              length As Integer,
+                                              ByRef crLfCount As Integer,
+                                              ByRef lfCount As Integer,
+                                              ByRef crCount As Integer)
+        If length = 2 Then
+            crLfCount += 1
+        ElseIf input.Peek() = 10 Then
+            lfCount += 1
+        Else
+            crCount += 1
+        End If
     End Sub
 
     Private Shared Sub AddParsedRecord(document As CsvDocument,

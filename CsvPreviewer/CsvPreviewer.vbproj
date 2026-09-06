@@ -13,6 +13,7 @@
     <FileAlignment>512</FileAlignment>
     <MyType>Empty</MyType>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <Prefer32Bit>false</Prefer32Bit>
     <TargetFrameworkProfile />
     <OptionExplicit>On</OptionExplicit>
     <OptionCompare>Binary</OptionCompare>
@@ -56,6 +57,8 @@
     <Compile Include="CsvExporter.vb" />
     <Compile Include="CsvModels.vb" />
     <Compile Include="CsvParser.vb" />
+    <Compile Include="CsvCharacterReader.vb" />
+    <Compile Include="CsvFileReader.vb" />
     <Compile Include="CsvSqlEngine.vb" />
     <Compile Include="CsvTableBuilder.vb" />
     <Compile Include="CsvTextCodec.vb" />

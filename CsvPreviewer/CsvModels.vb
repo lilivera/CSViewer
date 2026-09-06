@@ -170,5 +170,6 @@ Public NotInheritable Class CsvDocument
         If _releasedDataRowCount >= 0 Then Return
         _releasedDataRowCount = DataRowCount
         Records.Clear()
+        Records.TrimExcess()
     End Sub
 End Class

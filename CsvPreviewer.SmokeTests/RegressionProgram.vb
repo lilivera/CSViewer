@@ -9,8 +9,12 @@ Friend Module RegressionProgram
     Private _passed As Integer
 
     <STAThread>
-    Public Sub Main()
+    Public Sub Main(args As String())
         Try
+            If args.Length > 0 AndAlso args(0) = "--benchmark" Then
+                CsvLoadBenchmark.Run()
+                Return
+            End If
             RunTest("引用符・改行・末尾空項目", AddressOf ParseQuotedFields)
             RunTest("列数不一致の検出", AddressOf DetectColumnMismatch)
             RunTest("非引用フィールド中の裸引用符", AddressOf RejectBareQuote)
@@ -35,6 +39,12 @@ Friend Module RegressionProgram
             RunTest("SQLキャンセル", AddressOf CancelSqlExecution)
             RunTest("lossy復号状態をDocumentへ保持", AddressOf PreserveLossyDecodeState)
             RunTest("ヘッダーIssueに対象列を保持", AddressOf HeaderIssueContainsColumnIndex)
+
+            RunTest("ストリームのバッファ境界・長いフィールド", AddressOf LargeCsvTests.BufferBoundaries)
+            RunTest("ファイル文字コード・末尾復号エラー", AddressOf LargeCsvTests.FileEncodings)
+            RunTest("表への移動時のメモリ解放と保存互換性", AddressOf LargeCsvTests.ConsumingTableBuild)
+            RunTest("10万行の検索・ソート・SQL", AddressOf LargeCsvTests.LargeTableOperations)
+            RunTest("Issue移動時の行共有", AddressOf LargeCsvTests.IssueNavigationKeepsRowsShared)
 
             Console.WriteLine()
             Console.WriteLine("全{0}件の回帰テストに成功しました。", _passed)

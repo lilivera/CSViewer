@@ -12,6 +12,7 @@
     <FileAlignment>512</FileAlignment>
     <MyType>Empty</MyType>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <Prefer32Bit>false</Prefer32Bit>
     <TargetFrameworkProfile />
     <OptionExplicit>On</OptionExplicit>
     <OptionCompare>Binary</OptionCompare>
@@ -37,6 +38,7 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Data" />
+    <Reference Include="System.Xml" />
     <Reference Include="System.Drawing" />
     <Reference Include="System.Windows.Forms" />
   </ItemGroup>
@@ -46,6 +48,8 @@
   <ItemGroup>
     <Compile Include="Program.vb" />
     <Compile Include="RegressionProgram.vb" />
+    <Compile Include="LargeCsvTests.vb" />
+    <Compile Include="CsvLoadBenchmark.vb" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\CsvPreviewer\CsvPreviewer.vbproj">
