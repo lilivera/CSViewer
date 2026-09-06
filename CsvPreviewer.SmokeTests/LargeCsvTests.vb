@@ -55,7 +55,16 @@ Friend Module LargeCsvTests
                     Dim expected As DecodedCsvText = CsvTextCodec.DecodeBytes(bytes, requested)
                     Dim info As DecodedCsvText = Nothing
                     Using reader As StreamReader = CsvTextCodec.OpenFileReader(path, requested, info)
-                        Equal(expected.Text, reader.ReadToEnd(), "ストリーム復号")
+                        Dim actual As String = reader.ReadToEnd()
+                        If expected.Text <> actual Then
+                            Dim mismatch As Integer = 0
+                            While mismatch < Math.Min(expected.Text.Length, actual.Length) AndAlso expected.Text(mismatch) = actual(mismatch)
+                                mismatch += 1
+                            End While
+                            Throw New Exception(String.Format("復号差異 source={0} bom={1} requested={2} selected={3} lossy={4} expected_length={5} actual_length={6} first_mismatch={7}",
+                                encoding.WebName, encoding.GetPreamble().Length, requested, info.EncodingKind,
+                                info.UsedReplacementCharacter, expected.Text.Length, actual.Length, mismatch))
+                        End If
                     End Using
                     Equal(expected.EncodingKind, info.EncodingKind, "文字コード")
                     Equal(expected.HasBom, info.HasBom, "BOM")
