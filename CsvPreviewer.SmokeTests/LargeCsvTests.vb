@@ -54,7 +54,7 @@ Friend Module LargeCsvTests
                     CsvTextEncoding.Utf16LittleEndian, CsvTextEncoding.Utf16BigEndian}
                     Dim expected As DecodedCsvText = CsvTextCodec.DecodeBytes(bytes, requested)
                     Dim info As DecodedCsvText = Nothing
-                    Using reader As StreamReader = CsvTextCodec.OpenFileReader(path, requested, info)
+                    Using reader As CsvFileReader = CsvTextCodec.OpenFileReader(path, requested, info)
                         Dim actual As String = reader.ReadToEnd()
                         If expected.Text <> actual Then
                             Dim mismatch As Integer = 0
@@ -83,6 +83,13 @@ Friend Module LargeCsvTests
             End Using
             Equal(CsvTextEncoding.ShiftJis, CsvParser.Load(path, New CsvLoadOptions()).EncodingKind,
                   "先頭64K以降のShift_JISを検出")
+            Using stream As New FileStream(path, FileMode.Create)
+                stream.Write(lateBytes, 0, lateBytes.Length)
+                stream.WriteByte(&H82)
+            End Using
+            Dim truncated As CsvDocument = CsvParser.Load(path, New CsvLoadOptions With {.Encoding = CsvTextEncoding.ShiftJis})
+            Equal(True, truncated.IsLossyDecode, "末尾のShift_JIS先行バイト")
+            Equal("?", truncated.Records(1).Fields(1), "末尾の代替文字")
             Dim lossy As CsvDocument = CsvParser.Load(path, New CsvLoadOptions With {.Encoding = CsvTextEncoding.Utf8NoBom})
             Equal(True, lossy.IsLossyDecode, "末尾の復号エラー")
         Finally

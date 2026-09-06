@@ -9,7 +9,7 @@ Public NotInheritable Class CsvTextCodec
     Public Shared Function DecodeFile(filePath As String,
                                       requestedEncoding As CsvTextEncoding) As DecodedCsvText
         Dim result As DecodedCsvText = Nothing
-        Using reader As StreamReader = OpenFileReader(filePath, requestedEncoding, result)
+        Using reader As CsvFileReader = OpenFileReader(filePath, requestedEncoding, result)
             result.Text = reader.ReadToEnd()
         End Using
         Return result
@@ -19,7 +19,7 @@ Public NotInheritable Class CsvTextCodec
     ' entire file (including invalid bytes beyond the detection prefix).
     Public Shared Function OpenFileReader(filePath As String,
                                            requestedEncoding As CsvTextEncoding,
-                                           ByRef result As DecodedCsvText) As StreamReader
+                                           ByRef result As DecodedCsvText) As CsvFileReader
         Dim prefix As Byte() = ReadFilePrefix(filePath, 65536)
         Dim bomEncoding As CsvTextEncoding = DetectBom(prefix)
         Dim kind As CsvTextEncoding = requestedEncoding
@@ -53,15 +53,11 @@ Public NotInheritable Class CsvTextCodec
         Return CreateFileReader(filePath, kind, hasBom, Not lossy)
     End Function
 
-    Friend Shared Function GetPreambleLength(decoded As DecodedCsvText) As Integer
-        Return GetBomLength(decoded.EncodingKind, decoded.HasBom)
-    End Function
-
     Private Shared Function CanDecodeFile(filePath As String,
                                            kind As CsvTextEncoding,
                                            hasBom As Boolean) As Boolean
         Try
-            Using reader As StreamReader = CreateFileReader(filePath, kind, hasBom, True)
+            Using reader As CsvFileReader = CreateFileReader(filePath, kind, hasBom, True)
                 Dim buffer(65535) As Char
                 While reader.Read(buffer, 0, buffer.Length) > 0
                 End While
@@ -75,12 +71,11 @@ Public NotInheritable Class CsvTextCodec
     Private Shared Function CreateFileReader(filePath As String,
                                               kind As CsvTextEncoding,
                                               hasBom As Boolean,
-                                              strict As Boolean) As StreamReader
+                                              strict As Boolean) As CsvFileReader
         Dim stream As New FileStream(filePath, FileMode.Open, FileAccess.Read,
                                      FileShare.Read, 65536, FileOptions.SequentialScan)
         Try
-            stream.Position = Math.Min(CLng(GetBomLength(kind, hasBom)), stream.Length)
-            Return New StreamReader(stream, GetEncodingForDecode(kind, strict), False, 65536, False)
+            Return New CsvFileReader(stream, GetEncodingForDecode(kind, strict), GetBomLength(kind, hasBom))
         Catch
             stream.Dispose()
             Throw

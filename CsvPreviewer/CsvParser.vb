@@ -18,15 +18,14 @@ Public NotInheritable Class CsvParser
 
         Dim decoded As DecodedCsvText = Nothing
         Dim document As CsvDocument
-        Using reader As StreamReader = CsvTextCodec.OpenFileReader(filePath, options.Encoding, decoded)
+        Using reader As CsvFileReader = CsvTextCodec.OpenFileReader(filePath, options.Encoding, decoded)
             Dim delimiter As String
             If options.Delimiter = CsvDelimiterOption.AutoDetect Then
                 ' Bound delimiter sniffing even when a candidate has an unclosed quote.
                 Dim sample(65535) As Char
                 Dim count As Integer = reader.ReadBlock(sample, 0, sample.Length)
                 delimiter = DetectDelimiter(New String(sample, 0, count))
-                reader.DiscardBufferedData()
-                reader.BaseStream.Position = CsvTextCodec.GetPreambleLength(decoded)
+                reader.Restart()
             Else
                 delimiter = CsvDelimiterResolver.Resolve(options.Delimiter)
             End If
